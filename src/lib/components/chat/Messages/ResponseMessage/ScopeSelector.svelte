@@ -4,6 +4,7 @@
 
 	export let kpi: string;
 	export let allowedCategories: string[] = []; // e.g. ['organization', 'tools']
+	export let initialSelection: string[] = [];
 	export let onSelect: (selection: string[]) => void;
 
 	const dispatch = createEventDispatcher();
@@ -14,6 +15,10 @@
 	let openDropdown: string | null = null;
 	let searchTerms: Record<string, string> = {};
 	let selectedScopes: string[] = [];
+
+	$: if (initialSelection?.length && selectedScopes.length === 0) {
+		selectedScopes = [...initialSelection];
+	}
 
 	// UI State
 	let visibleCategories: any[] = [];

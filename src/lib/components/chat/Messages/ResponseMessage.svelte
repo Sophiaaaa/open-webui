@@ -210,6 +210,7 @@
 	function formatBottunTimeRange(raw: string): string {
 		const s = (raw ?? '').trim();
 		if (!s) return '';
+		if (s.toLowerCase() === 'all') return 'all（不限制时间）';
 
 		const fyHalfOrQuarter = s.match(
 			/^FY\s*(\d{2}|\d{4})\s*(1H|2H|H1|H2|Q[1-4]|上半期|下半期)?$/i
@@ -1117,6 +1118,7 @@
 						<ScopeSelector
 							kpi={bottunMeta?.kpi ?? ''}
 							allowedCategories={categories}
+							initialSelection={bottunMeta?.scope ?? []}
 							onSelect={(selection) => {
 								submitMessage(message.id, selection.join(' '));
 							}}

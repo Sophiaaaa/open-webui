@@ -268,6 +268,65 @@ class DatabaseService:
             if conn:
                 conn.close()
 
+    def find_exact_match(
+        self,
+        table_name: str,
+        column_name: str,
+        value: str,
+        filters: Dict[str, List[str]] | None = None,
+        case_insensitive: bool = True,
+    ) -> str | None:
+        if not value:
+            return None
+
+        if not re.fullmatch(r"[A-Za-z0-9_]+", table_name or ""):
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9_]+", column_name or ""):
+            return None
+
+        conn = self.get_connection()
+        if not conn:
+            return None
+
+        cursor = conn.cursor()
+        try:
+            where_parts: List[str] = [f"{column_name} IS NOT NULL"]
+            params: List[Any] = []
+
+            if case_insensitive:
+                where_parts.append(f"LOWER({column_name}) = LOWER(%s)")
+            else:
+                where_parts.append(f"{column_name} = %s")
+            params.append(value)
+
+            if filters:
+                for col, vals in filters.items():
+                    if not vals:
+                        continue
+                    if not re.fullmatch(r"[A-Za-z0-9_]+", col or ""):
+                        continue
+                    if len(vals) == 1:
+                        where_parts.append(f"{col} = %s")
+                        params.append(vals[0])
+                    else:
+                        placeholders = ",".join(["%s"] * len(vals))
+                        where_parts.append(f"{col} IN ({placeholders})")
+                        params.extend(vals)
+
+            where_clause = " AND ".join(where_parts)
+            sql = f"SELECT DISTINCT {column_name} FROM {table_name} WHERE {where_clause} LIMIT 1"
+            cursor.execute(sql, tuple(params))
+            row = cursor.fetchone()
+            return str(row[0]) if row and row[0] is not None else None
+        except Exception as e:
+            print(f"Error finding exact match: {e}")
+            return None
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
     def execute_query(self, sql: str) -> Dict[str, Any]:
         conn = self.get_connection()
         if not conn:
@@ -452,6 +511,8 @@ class AIService:
             ("su hour", "su_hour_per_tool"),
             ("su工时", "su_hour_per_tool"),
             ("平均装机时间", "su_hour_per_tool"),
+            ("平均装机小时数", "su_hour_per_tool"),
+            ("平均装机小时", "su_hour_per_tool"),
             ("装机时间", "su_hour_per_tool"),
             ("装机工时", "su_hour_per_tool"),
             ("平均每台的装机结果", "su_hour_per_tool"),
@@ -504,6 +565,25 @@ class AIService:
         import re
         from datetime import datetime
         known_products = ["CT", "3DI", "SPS", "ES", "SSP", "TPS", "TS", "FSI", "Certas", "SD", "Epion", "FPD"]
+
+        time_all_intent_strong = (
+            bool(re.search(r"(所有|全部)\s*范围", query))
+            or bool(re.search(r"(所有|全部)\s*(时间|日期|月份|月度|年度|财年|年|月)", query))
+            or bool(re.search(r"(所有|全部)(的)?(时间范围|日期范围|月份范围|时间|日期)", query))
+            or bool(re.search(r"(不限制|不限|不限定|不设限|无限制)\s*(时间|日期|月份|月度|年度|财年|时间范围|日期范围)?", query))
+            or bool(re.search(r"(时间|日期|月份|月度|年度|财年|时间范围|日期范围)\s*(不限制|不限|不限定|不设限|无限制)", query))
+            or bool(re.search(r"(不筛选|不做筛选|不需要筛选|不过滤|不过滤)\s*(时间|日期|月份|时间范围|日期范围)?", query))
+            or bool(re.search(r"(时间|日期|月份|时间范围|日期范围)\s*(不筛选|不做筛选|不需要筛选|不过滤|不过滤)", query))
+            or bool(re.search(r"(all\s*time|any\s*time|no\s*time\s*filter|without\s*time\s*filter|no\s*date\s*filter)", query_lower))
+        )
+
+        time_all_intent_weak = (
+            query_lower.strip() in {"all", "all time", "any", "any time", "全部", "所有", "不限", "不限制", "不限定"}
+            and not extracted_time
+            and bool(context_kpi or context_scope)
+        )
+
+        time_all_intent = time_all_intent_strong or time_all_intent_weak
         
         # Pre-process shortcuts
         current_date = datetime.now()
@@ -551,11 +631,11 @@ class AIService:
 
             # Natural year keywords
             if "今年" in t or "本年" in t:
-                t = t.replace("今年", _natural_year_range(current_year)).replace("本年", _natural_year_range(current_year))
+                t = t.replace("今年", f" {_natural_year_range(current_year)} ").replace("本年", f" {_natural_year_range(current_year)} ")
             if "去年" in t:
-                t = t.replace("去年", _natural_year_range(current_year - 1))
+                t = t.replace("去年", f" {_natural_year_range(current_year - 1)} ")
             if "明年" in t:
-                t = t.replace("明年", _natural_year_range(current_year + 1))
+                t = t.replace("明年", f" {_natural_year_range(current_year + 1)} ")
 
             # Month formats: 2025年3月 / 25年3月份
             def repl_month_cn(m):
@@ -652,15 +732,18 @@ class AIService:
         fy_end_year = fy_start_year + 1
 
         if "当前财年" in query:
-            query = query.replace("当前财年", f"{fy_start_year}04-{fy_end_year}03")
+            query = query.replace("当前财年", f" {fy_start_year}04-{fy_end_year}03 ")
 
         if "半期" in query:
             if 4 <= current_month <= 9:
-                query = query.replace("半期", f"{fy_start_year}04-{fy_start_year}09")
+                query = query.replace("半期", f" {fy_start_year}04-{fy_start_year}09 ")
             else:
-                query = query.replace("半期", f"{fy_start_year}10-{fy_end_year}03")
+                query = query.replace("半期", f" {fy_start_year}10-{fy_end_year}03 ")
 
         query = _normalize_time_expressions(query)
+
+        if time_all_intent_strong or (time_all_intent_weak and not extracted_time):
+            extracted_time = "all"
 
         # 2a. Extract Time first to avoid misidentifying it as SN
         new_time = None
@@ -680,15 +763,17 @@ class AIService:
         # 2b. Extract Scopes
         new_scopes = []
 
-        explicit_scope_pairs = re.findall(r"\b(product|organization|tools):([^\s]+)", query, flags=re.IGNORECASE)
+        explicit_scope_pairs = re.findall(r"\b(product|organization|tools|tool):([^\s]+)", query, flags=re.IGNORECASE)
         for cat, val in explicit_scope_pairs:
             cat = cat.lower()
+            if cat == "tool":
+                cat = "tools"
             val = val.strip()
             if val:
                 new_scopes.append(f"{cat}:{val}")
 
         for prod in known_products:
-            if prod.lower() in query_lower:
+            if re.search(rf"(?<![A-Za-z0-9_]){re.escape(prod)}(?![A-Za-z0-9_])", query, flags=re.IGNORECASE):
                 new_scopes.append(f"product:{prod}")
 
         # Manual SN extraction (6 digits)
@@ -702,6 +787,57 @@ class AIService:
             if sn.startswith('20') and (202001 <= int(sn) <= 203012):
                 continue
             new_scopes.append(f"tools:{sn}")
+
+        # DB-assisted scope resolution for organization/tools (alphanumeric entities)
+        try:
+            kpi_def = kpi_definitions.get(matched_kpi) if matched_kpi else None
+            table_name = (kpi_def or {}).get("table_name")
+            scope_cols = (kpi_def or {}).get("scope_columns", {})
+            org_col = scope_cols.get("organization")
+            tools_col = scope_cols.get("tools")
+
+            existing_orgs = {
+                s.split(":", 1)[1]
+                for s in (found_scopes + new_scopes)
+                if s.startswith("organization:") and ":" in s
+            }
+
+            if db_service and table_name and (org_col or tools_col):
+                raw_tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]{1,49}", query)
+                candidates: List[str] = []
+                seen = set()
+                for t in raw_tokens:
+                    tt = t.strip()
+                    if not tt:
+                        continue
+                    if tt.upper().startswith("FY") and re.fullmatch(r"FY\d{2,4}", tt.upper()):
+                        continue
+                    if re.fullmatch(r"20\d{4}", tt):
+                        continue
+                    if tt.upper() in known_products:
+                        continue
+                    if tt.lower() in {"kpi", "sql", "sn", "tool", "tools", "product", "organization"}:
+                        continue
+                    if tt not in seen:
+                        seen.add(tt)
+                        candidates.append(tt)
+                candidates = candidates[:8]
+
+                for token in candidates:
+                    if org_col:
+                        match = db_service.find_exact_match(table_name, org_col, token)
+                        if match and match not in existing_orgs:
+                            new_scopes.append(f"organization:{match}")
+                            existing_orgs.add(match)
+
+                    if tools_col:
+                        match = db_service.find_exact_match(table_name, tools_col, token)
+                        if match:
+                            scope_str = f"tools:{match}"
+                            if scope_str not in new_scopes and scope_str not in found_scopes:
+                                new_scopes.append(scope_str)
+        except Exception as e:
+            print(f"DB-assisted scope resolution failed: {e}")
 
         # Update found_scopes
         if new_kpi and new_kpi != context_kpi:
@@ -759,6 +895,8 @@ class AIService:
            - 如果用户说“明年”，按自然年转换为 "{current_year + 1}01-{current_year + 1}12"。
            - 自然时间示例："2024年" -> "202401-202412"；"202505" -> "202505"；"25年3月份" -> "202503"；"25年第三季度" -> "202507-202509"。
            - 财年示例（财年从4月到次年3月）："FY26" -> "202504-202603"；"FY26 2H" -> "202510-202603"。
+           - 如果用户明确表达“不筛选时间/不限制时间/不限时间/所有范围/全部范围/所有时间/全部时间/all time/any time”，time_range 返回 "all"。
+           - 兜底：如果用户只回复“所有/全部/不限/不限制/不限定”，且当前 time_range 为空，也视为 time_range="all"。
         
         [Output Format]
         Return JSON ONLY:
@@ -877,7 +1015,9 @@ class AIService:
         conditions = []
         
         # 1. Handle Time
-        if time_range:
+        if time_range and str(time_range).strip().lower() == "all":
+            pass
+        elif time_range:
             if time_range.upper().startswith('FY'):
                 try:
                     yy = time_range[2:]
@@ -930,6 +1070,9 @@ class AIService:
         # Programmatic generation is much faster and reliable for clear params
         print(f"Generating conditions programmatically for {kpi}...")
         conditions = self._build_conditions_programmatically(kpi, time_range, scope, kpi_config)
+
+        if not (conditions or "").strip():
+            return ""
         
         if not conditions.upper().startswith("AND "):
             return f" AND {conditions}"

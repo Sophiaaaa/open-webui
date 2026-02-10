@@ -95,6 +95,8 @@ from open_webui.routers import (
     scim,
 )
 
+from open_webui.apps.bottun.main import app as bottun_app
+
 from open_webui.routers.retrieval import (
     get_embedding_function,
     get_reranking_function,
@@ -2385,6 +2387,7 @@ async def healthcheck_with_db():
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/bottun", bottun_app)
 
 
 @app.get("/cache/{path:path}")

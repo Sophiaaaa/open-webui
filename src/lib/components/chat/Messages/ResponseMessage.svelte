@@ -62,6 +62,44 @@
 	import RegenerateMenu from './ResponseMessage/RegenerateMenu.svelte';
 	import StatusHistory from './ResponseMessage/StatusHistory.svelte';
 	import FullHeightIframe from '$lib/components/common/FullHeightIframe.svelte';
+	import ScopeSelector from './ResponseMessage/ScopeSelector.svelte';
+
+	type BottunMeta = {
+		kpi?: string | null;
+		time_range?: string | null;
+		scope?: string[] | null;
+		sql?: string | null;
+		missing_params?: string[] | null;
+		missing_scope_categories?: string[] | null;
+	};
+
+	function decodeBottunMetaBase64(b64url: string): BottunMeta | null {
+		try {
+			const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
+			const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+			const jsonStr = decodeURIComponent(
+				Array.from(atob(padded))
+					.map((c) => `%${c.charCodeAt(0).toString(16).padStart(2, '0')}`)
+					.join('')
+			);
+			return JSON.parse(jsonStr);
+		} catch {
+			return null;
+		}
+	}
+
+	function extractBottunMeta(content: string): BottunMeta | null {
+		const match = content.match(/<!--\s*BOTTUN_META:\s*([A-Za-z0-9_\-]+=*)\s*-->/);
+		if (!match) return null;
+		return decodeBottunMetaBase64(match[1]);
+	}
+
+	function stripBottunMeta(content: string): string {
+		return (content ?? '')
+			.replace(/<!--\s*BOTTUN_META:\s*[A-Za-z0-9_\-]+=*\s*-->\s*/g, '')
+			.replace(/&lt;!--\s*BOTTUN_META:\s*[A-Za-z0-9_\-]+=*\s*--&gt;\s*/g, '')
+			.trimEnd();
+	}
 
 	interface MessageType {
 		id: string;
@@ -160,6 +198,193 @@
 	let model = null;
 	$: model = $models.find((m) => m.id === message.model);
 
+	let bottunMeta: BottunMeta | null = null;
+	$: bottunMeta = (message?.content ?? '').includes('BOTTUN_META') ? extractBottunMeta(message.content) : null;
+
+	let displayContent = '';
+	$: displayContent = stripBottunMeta(message?.content ?? '');
+
+	let bottunChartLoading = false;
+	let bottunHasData = false;
+
+	function formatBottunTimeRange(raw: string): string {
+		const s = (raw ?? '').trim();
+		if (!s) return '';
+
+		const fyHalfOrQuarter = s.match(
+			/^FY\s*(\d{2}|\d{4})\s*(1H|2H|H1|H2|Q[1-4]|上半期|下半期)?$/i
+		);
+		if (fyHalfOrQuarter) {
+			let fyEndYear = Number.parseInt(fyHalfOrQuarter[1], 10);
+			if (fyEndYear < 100) fyEndYear = 2000 + fyEndYear;
+			const fyStartYear = fyEndYear - 1;
+			const tag = (fyHalfOrQuarter[2] ?? '').toUpperCase();
+			if (tag === '1H' || tag === 'H1' || fyHalfOrQuarter[2] === '上半期') {
+				return `${fyStartYear}04-${fyStartYear}09`;
+			}
+			if (tag === '2H' || tag === 'H2' || fyHalfOrQuarter[2] === '下半期') {
+				return `${fyStartYear}10-${fyEndYear}03`;
+			}
+			if (tag.startsWith('Q')) {
+				const q = Number.parseInt(tag.slice(1), 10);
+				if (q === 1) return `${fyStartYear}04-${fyStartYear}06`;
+				if (q === 2) return `${fyStartYear}07-${fyStartYear}09`;
+				if (q === 3) return `${fyStartYear}10-${fyStartYear}12`;
+				if (q === 4) return `${fyEndYear}01-${fyEndYear}03`;
+			}
+			return `${fyStartYear}04-${fyEndYear}03`;
+		}
+
+		if (/^20\d{4}-20\d{4}$/.test(s)) return s;
+		if (/^20\d{4}$/.test(s)) return `${s}-${s}`;
+		if (/^20\d{2}$/.test(s)) return `${s}01-${s}12`;
+		return s;
+	}
+
+	function computeBottunHasData() {
+		try {
+			const table = contentContainerElement?.querySelector('table');
+			if (!table) {
+				bottunHasData = false;
+				return;
+			}
+			const rows = table.querySelectorAll('tbody tr');
+			bottunHasData = rows.length > 0;
+		} catch {
+			bottunHasData = false;
+		}
+	}
+
+	onMount(() => {
+		computeBottunHasData();
+		const target = contentContainerElement;
+		if (!target) return;
+		const obs = new MutationObserver(() => computeBottunHasData());
+		obs.observe(target, { childList: true, subtree: true, characterData: true });
+		return () => obs.disconnect();
+	});
+
+	function encodeBottunMeta(meta: Record<string, any>): string {
+		const jsonStr = JSON.stringify(meta);
+		const bytes = new TextEncoder().encode(jsonStr);
+		let binary = '';
+		for (const b of bytes) binary += String.fromCharCode(b);
+		return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+	}
+
+	async function startBottunNewConversation() {
+		const resetMeta = {
+			kpi: null,
+			time_range: null,
+			scope: [],
+			missing_params: ['kpi'],
+			missing_scope_categories: null,
+			sql: null,
+			scope_prompted: false
+		};
+		const metaComment = `<!-- BOTTUN_META: ${encodeBottunMeta(resetMeta)} -->`;
+		await addMessages({
+			modelId: message.model,
+			parentId: message.id,
+			messages: [
+				{
+					role: 'assistant',
+					content: `已开始新对话。请问您想查询什么指标？\n\n${metaComment}`
+				}
+			]
+		});
+	}
+
+	function buildBottunDownloadUrl(meta: BottunMeta): string {
+		const params: string[] = [];
+		if (meta.kpi) params.push(`kpi=${encodeURIComponent(meta.kpi)}`);
+		if (meta.time_range) params.push(`time_range=${encodeURIComponent(meta.time_range)}`);
+		for (const s of meta.scope ?? []) {
+			params.push(`scope=${encodeURIComponent(s)}`);
+		}
+		return `/bottun/chat/download/get?${params.join('&')}`;
+	}
+
+	async function generateBottunChart() {
+		if (!bottunMeta?.kpi) return;
+		bottunChartLoading = true;
+		try {
+			const table = contentContainerElement?.querySelector('table');
+			if (!table) {
+				throw new globalThis.Error('未找到结果表格，无法生成图片');
+			}
+
+			const ths = Array.from(table.querySelectorAll('thead th'));
+			const title = (ths[1]?.textContent ?? '').trim() || bottunMeta.kpi;
+
+			const rows = Array.from(table.querySelectorAll('tbody tr'));
+			const months: string[] = [];
+			const values: number[] = [];
+			for (const tr of rows) {
+				const tds = Array.from(tr.querySelectorAll('td'));
+				const month = (tds[0]?.textContent ?? '').trim();
+				const rawVal = (tds[1]?.textContent ?? '').trim();
+				if (!month || !rawVal) continue;
+				const v = Number.parseFloat(rawVal);
+				if (Number.isNaN(v)) continue;
+				months.push(month);
+				values.push(v);
+			}
+
+			if (months.length === 0 || values.length === 0) {
+				throw new globalThis.Error('表格中没有可绘制的数据');
+			}
+
+			const echarts = await import('echarts');
+			const el = document.createElement('div');
+			el.style.width = '860px';
+			el.style.height = '360px';
+			el.style.position = 'fixed';
+			el.style.left = '-10000px';
+			el.style.top = '0';
+			document.body.appendChild(el);
+
+			try {
+				const chart = echarts.init(el);
+				chart.setOption({
+					title: { text: title, left: 'center' },
+					tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+					grid: { left: 48, right: 24, top: 56, bottom: 32 },
+					xAxis: {
+						type: 'category',
+						data: months,
+						axisLabel: { rotate: 0 }
+					},
+					yAxis: { type: 'value' },
+					series: [{ type: 'bar', data: values, barMaxWidth: 28 }]
+				});
+				chart.resize();
+				await new Promise<void>((resolve) =>
+					requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+				);
+
+				const dataUrl = chart.getDataURL({
+					type: 'png',
+					pixelRatio: 2,
+					backgroundColor: '#ffffff'
+				});
+				chart.dispose();
+
+				await addMessages({
+					modelId: message.model,
+					parentId: message.id,
+					messages: [{ role: 'assistant', content: `![Chart](${dataUrl})` }]
+				});
+			} finally {
+				document.body.removeChild(el);
+			}
+		} catch (e) {
+			toast.error(`${e}`);
+		} finally {
+			bottunChartLoading = false;
+		}
+	}
+
 	let edit = false;
 	let editedContent = '';
 	let editTextAreaElement: HTMLTextAreaElement;
@@ -174,7 +399,7 @@
 	let showRateComment = false;
 
 	const copyToClipboard = async (text) => {
-		text = removeAllDetails(text);
+		text = stripBottunMeta(removeAllDetails(text));
 
 		if (($config?.ui?.response_watermark ?? '').trim() !== '') {
 			text = `${text}\n\n${$config?.ui?.response_watermark}`;
@@ -205,7 +430,7 @@
 		}
 
 		speaking = true;
-		const content = removeAllDetails(message.content);
+		const content = stripBottunMeta(removeAllDetails(message.content));
 
 		// Get voice: model-specific > user settings > config default
 		const getVoiceId = () => {
@@ -610,7 +835,8 @@
 	>
 		<div class={`shrink-0 ltr:mr-3 rtl:ml-3 hidden @lg:flex mt-1 `}>
 			<ProfileImage
-				src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}`}
+				src={model?.info?.meta?.profile_image_url ??
+					`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}`}
 				className={'size-8 assistant-message-profile-image'}
 			/>
 		</div>
@@ -767,7 +993,7 @@
 									messageId={message.id}
 									{history}
 									{selectedModels}
-									content={message.content}
+									content={displayContent}
 									sources={message.sources}
 									floatingButtons={message?.done &&
 										!readOnly &&
@@ -820,11 +1046,103 @@
 							{#if message.code_executions}
 								<CodeExecutions codeExecutions={message.code_executions} />
 							{/if}
+
+			{#if model?.info?.meta?.is_bottun_rule_bot &&
+				bottunMeta?.sql &&
+				(message?.done ?? false) &&
+				((bottunMeta?.missing_params ?? []).length === 0) &&
+				!readOnly}
+				<div class="mt-2 flex gap-2">
+					{#if bottunHasData}
+						<button
+							class="px-3 py-1 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 rounded-lg text-sm transition disabled:opacity-60"
+							disabled={bottunChartLoading}
+							on:click={generateBottunChart}
+						>
+							{bottunChartLoading ? '生成中…' : '生成图片'}
+						</button>
+						<button
+							class="px-3 py-1 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 rounded-lg text-sm transition"
+							on:click={() => {
+								if (bottunMeta?.kpi) {
+									window.open(buildBottunDownloadUrl(bottunMeta), '_blank');
+								}
+							}}
+						>
+							下载明细
+						</button>
+					{/if}
+					<button
+						class="px-3 py-1 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 rounded-lg text-sm transition"
+						on:click={startBottunNewConversation}
+					>
+						新对话
+					</button>
+				</div>
+			{/if}
+
 						</div>
 					</div>
 				</div>
 
 				{#if !edit}
+					{@const bottunMissing = bottunMeta?.missing_params ?? []}
+					{#if model?.info?.meta?.is_bottun_rule_bot && (bottunMissing.includes('time_range') || message.content.includes('请提供时间范围')) && isLastMessage && !readOnly}
+						<div class="flex gap-2 mt-2">
+							<button 
+								class="px-3 py-1 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 rounded-lg text-sm transition" 
+								on:click={() => submitMessage(message.id, "当前财年")}
+							>
+								当前财年
+							</button>
+							<button 
+								class="px-3 py-1 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 rounded-lg text-sm transition" 
+								on:click={() => submitMessage(message.id, "半期")}
+							>
+								半期
+							</button>
+						</div>
+					{/if}
+
+					{#if model?.info?.meta?.is_bottun_rule_bot &&
+						(bottunMissing.includes('scope') || message.content.includes('请问您需要查询哪些')) &&
+						!bottunMissing.includes('time_range') &&
+						!message.content.includes('请提供时间范围') &&
+						isLastMessage &&
+						!readOnly}
+						{@const fallbackScopeMatch = message.content.match(/请问您需要查询哪些(.*?)？/)}
+						{@const categories = (bottunMeta?.missing_scope_categories && bottunMeta.missing_scope_categories.length > 0)
+							? bottunMeta.missing_scope_categories
+							: (fallbackScopeMatch ? fallbackScopeMatch[1].split('、').map((s) => s.trim()) : [])}
+						<ScopeSelector
+							kpi={bottunMeta?.kpi ?? ''}
+							allowedCategories={categories}
+							onSelect={(selection) => {
+								submitMessage(message.id, selection.join(' '));
+							}}
+						/>
+					{/if}
+
+					{#if model?.info?.meta?.is_bottun_rule_bot && bottunMeta && (bottunMeta.kpi || bottunMeta.time_range || (bottunMeta.scope && bottunMeta.scope.length > 0) || bottunMeta.sql)}
+						<div class="mt-2 text-xs text-gray-400 italic">
+							{#if bottunMeta.kpi}
+								<div>KPI：{bottunMeta.kpi}</div>
+							{/if}
+							{#if bottunMeta.time_range}
+								<div>时间范围：{formatBottunTimeRange(bottunMeta.time_range)}</div>
+							{/if}
+							{#if bottunMeta.scope && bottunMeta.scope.length > 0}
+								<div>筛选条件：{bottunMeta.scope.join(', ')}</div>
+							{/if}
+							{#if bottunMeta.sql}
+								<details class="mt-1">
+									<summary class="cursor-pointer">SQL</summary>
+									<pre class="mt-1 p-2 bg-gray-50 dark:bg-gray-900/40 rounded text-[10px] overflow-x-auto not-italic text-gray-500 dark:text-gray-400 font-mono">{bottunMeta.sql}</pre>
+								</details>
+							{/if}
+						</div>
+					{/if}
+
 					<div
 						bind:this={buttonsContainerElement}
 						class="flex justify-start overflow-x-auto buttons text-gray-600 dark:text-gray-500 mt-0.5"
@@ -929,7 +1247,7 @@
 
 							{#if message.done}
 								{#if !readOnly}
-									{#if $user?.role === 'user' ? ($user?.permissions?.chat?.edit ?? true) : true}
+									{#if ($user?.role === 'user' ? ($user?.permissions?.chat?.edit ?? true) : true) && !model?.info?.meta?.is_bottun_rule_bot}
 										<Tooltip content={$i18n.t('Edit')} placement="bottom">
 											<button
 												aria-label={$i18n.t('Edit')}
@@ -960,35 +1278,65 @@
 									{/if}
 								{/if}
 
-								<Tooltip content={$i18n.t('Copy')} placement="bottom">
-									<button
-										aria-label={$i18n.t('Copy')}
-										class="{isLastMessage || ($settings?.highContrastMode ?? false)
-											? 'visible'
-											: 'invisible group-hover:visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition copy-response-button"
-										on:click={() => {
-											copyToClipboard(message.content);
-										}}
-									>
-										<svg
-											xmlns="http://www.w3.org/2000/svg"
-											fill="none"
-											aria-hidden="true"
-											viewBox="0 0 24 24"
-											stroke-width="2.3"
-											stroke="currentColor"
-											class="w-4 h-4"
+								{#if !model?.info?.meta?.is_bottun_rule_bot}
+									<Tooltip content={$i18n.t('Copy')} placement="bottom">
+										<button
+											aria-label={$i18n.t('Copy')}
+											class="{isLastMessage || ($settings?.highContrastMode ?? false)
+												? 'visible'
+												: 'invisible group-hover:visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition copy-response-button"
+											on:click={() => {
+												copyToClipboard(message.content);
+											}}
 										>
-											<path
-												stroke-linecap="round"
-												stroke-linejoin="round"
-												d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184"
-											/>
-										</svg>
-									</button>
-								</Tooltip>
+											<svg
+												xmlns="http://www.w3.org/2000/svg"
+												fill="none"
+												aria-hidden="true"
+												viewBox="0 0 24 24"
+												stroke-width="2.3"
+												stroke="currentColor"
+												class="w-4 h-4"
+											>
+												<path
+													stroke-linecap="round"
+													stroke-linejoin="round"
+													d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184"
+												/>
+											</svg>
+										</button>
+									</Tooltip>
+								{:else}
+									<Tooltip content={$i18n.t('Copy')} placement="bottom">
+										<button
+											aria-label={$i18n.t('Copy')}
+											class="{isLastMessage || ($settings?.highContrastMode ?? false)
+												? 'visible'
+												: 'invisible group-hover:visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition copy-response-button"
+											on:click={() => {
+												copyToClipboard(message.content);
+											}}
+										>
+											<svg
+												xmlns="http://www.w3.org/2000/svg"
+												fill="none"
+												aria-hidden="true"
+												viewBox="0 0 24 24"
+												stroke-width="2.3"
+												stroke="currentColor"
+												class="w-4 h-4"
+											>
+												<path
+													stroke-linecap="round"
+													stroke-linejoin="round"
+													d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184"
+												/>
+											</svg>
+										</button>
+									</Tooltip>
+								{/if}
 
-								{#if $user?.role === 'admin' || ($user?.permissions?.chat?.tts ?? true)}
+								{#if ($user?.role === 'admin' || ($user?.permissions?.chat?.tts ?? true)) && !model?.info?.meta?.is_bottun_rule_bot}
 									<Tooltip content={$i18n.t('Read Aloud')} placement="bottom">
 										<button
 											aria-label={$i18n.t('Read Aloud')}
@@ -1076,7 +1424,7 @@
 									</Tooltip>
 								{/if}
 
-								{#if message.usage}
+								{#if message.usage && !model?.info?.meta?.is_bottun_rule_bot}
 									<Tooltip
 										content={message.usage
 											? `<pre>${sanitizeResponseContent(
@@ -1199,7 +1547,7 @@
 										</Tooltip>
 									{/if}
 
-									{#if isLastMessage && ($user?.role === 'admin' || ($user?.permissions?.chat?.continue_response ?? true))}
+									{#if isLastMessage && ($user?.role === 'admin' || ($user?.permissions?.chat?.continue_response ?? true)) && !model?.info?.meta?.is_bottun_rule_bot}
 										<Tooltip content={$i18n.t('Continue Response')} placement="bottom">
 											<button
 												aria-label={$i18n.t('Continue Response')}
@@ -1236,7 +1584,7 @@
 										</Tooltip>
 									{/if}
 
-									{#if $user?.role === 'admin' || ($user?.permissions?.chat?.regenerate_response ?? true)}
+									{#if ($user?.role === 'admin' || ($user?.permissions?.chat?.regenerate_response ?? true)) && !model?.info?.meta?.is_bottun_rule_bot}
 										{#if $settings?.regenerateMenu ?? true}
 											<button
 												type="button"
@@ -1347,7 +1695,7 @@
 										{/if}
 									{/if}
 
-									{#if $user?.role === 'admin' || ($user?.permissions?.chat?.delete_message ?? true)}
+									{#if ($user?.role === 'admin' || ($user?.permissions?.chat?.delete_message ?? true)) && !model?.info?.meta?.is_bottun_rule_bot}
 										{#if siblings.length > 1}
 											<Tooltip content={$i18n.t('Delete')} placement="bottom">
 												<button
@@ -1381,7 +1729,7 @@
 										{/if}
 									{/if}
 
-									{#each model?.actions ?? [] as action}
+									{#each (model?.info?.meta?.is_bottun_rule_bot ? [] : (model?.actions ?? [])) as action}
 										<Tooltip content={action.name} placement="bottom">
 											<button
 												type="button"
@@ -1427,7 +1775,7 @@
 						/>
 					{/if}
 
-					{#if (isLastMessage || ($settings?.keepFollowUpPrompts ?? false)) && message.done && !readOnly && (message?.followUps ?? []).length > 0}
+					{#if (isLastMessage || ($settings?.keepFollowUpPrompts ?? false)) && message.done && !readOnly && (message?.followUps ?? []).length > 0 && !model?.info?.meta?.is_bottun_rule_bot}
 						<div class="mt-2.5" in:fade={{ duration: 100 }}>
 							<FollowUps
 								followUps={message?.followUps}

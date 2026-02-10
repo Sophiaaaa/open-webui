@@ -54,6 +54,7 @@
 	import DropdownOptions from '$lib/components/common/DropdownOptions.svelte';
 	import Pagination from '$lib/components/common/Pagination.svelte';
 	import AttachWebpageModal from '$lib/components/chat/MessageInput/AttachWebpageModal.svelte';
+	import { WEBUI_API_BASE_URL } from '$lib/constants';
 
 	let largeScreen = true;
 
@@ -84,6 +85,11 @@
 	let selectedFileId = null;
 	let selectedFile = null;
 	let selectedFileContent = '';
+	let isSelectedFilePDF = false;
+
+	$: isSelectedFilePDF =
+		selectedFile?.meta?.content_type === 'application/pdf' ||
+		(selectedFile?.meta?.name && selectedFile.meta.name.toLowerCase().endsWith('.pdf'));
 
 	let inputFiles = null;
 
@@ -1060,7 +1066,7 @@
 											{selectedFile?.meta?.name}
 										</div>
 
-										{#if knowledge?.write_access}
+									{#if knowledge?.write_access && !isSelectedFilePDF}
 											<div>
 												<button
 													class="flex self-center w-fit text-sm py-1 px-2.5 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1081,12 +1087,20 @@
 									</div>
 
 									{#key selectedFile.id}
-										<textarea
-											class="w-full h-full text-sm outline-none resize-none px-3 py-2"
-											bind:value={selectedFileContent}
-											disabled={!knowledge?.write_access}
-											placeholder={$i18n.t('Add content here')}
-										/>
+										{#if isSelectedFilePDF}
+											<iframe
+												title={selectedFile?.meta?.name}
+												src={`${WEBUI_API_BASE_URL}/files/${selectedFile.id}/content`}
+												class="w-full h-full border-0"
+											></iframe>
+										{:else}
+											<textarea
+												class="w-full h-full text-sm outline-none resize-none px-3 py-2"
+												bind:value={selectedFileContent}
+												disabled={!knowledge?.write_access}
+												placeholder={$i18n.t('Add content here')}
+											></textarea>
+										{/if}
 									{/key}
 								</div>
 							</div>

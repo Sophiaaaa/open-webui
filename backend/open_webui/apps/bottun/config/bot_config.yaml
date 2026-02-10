@@ -1,0 +1,3 @@
+bot_id: "bottun-rule-bot"
+bot_name: "KPI Bot"
+profile_image_url: "" # Leave empty to use default system image, or provide a URL (e.g. /static/bot.png or https://...)

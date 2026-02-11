@@ -349,6 +349,8 @@ async def chat_completions(request: OpenAIChatCompletionRequest):
                     current_context["scope"] = meta.get("scope") if isinstance(meta.get("scope"), list) else []
                 if meta.get("scope_prompted") is not None:
                     current_context["scope_prompted"] = bool(meta.get("scope_prompted"))
+                if meta.get("unsupported_kpi_notified") is not None:
+                    current_context["unsupported_kpi_notified"] = bool(meta.get("unsupported_kpi_notified"))
 
         if msg.role == "user":
             analysis = ai_service.analyze_intent(msg.content, kpi_config, ui_mappings, current_context, db_service)
@@ -368,6 +370,9 @@ async def chat_completions(request: OpenAIChatCompletionRequest):
         "missing_params": final_analysis.get("missing_params"),
         "missing_scope_categories": final_analysis.get("missing_scope_categories"),
         "scope_prompted": bool(current_context.get("scope_prompted")),
+        "unsupported_kpi": bool(final_analysis.get("unsupported_kpi")),
+        "unsupported_kpi_notified": bool(final_analysis.get("unsupported_kpi_notified") or current_context.get("unsupported_kpi_notified")),
+        "auto_new_conversation": bool(final_analysis.get("auto_new_conversation")),
     }
 
     scope_label_map = {
@@ -402,7 +407,9 @@ async def chat_completions(request: OpenAIChatCompletionRequest):
             parts.append(f"{label}={'/'.join(vals)}")
         return "；".join(parts)
     
-    if final_analysis.get('missing_params'):
+    if final_analysis.get('response_message'):
+        response_text = final_analysis['response_message']
+    elif final_analysis.get('missing_params'):
         # Generate question
         missing = final_analysis['missing_params']
         
@@ -430,8 +437,6 @@ async def chat_completions(request: OpenAIChatCompletionRequest):
                     response_text = "请问这就足够了吗？还需要限制其他部门或产品吗？（回答“没有”开始查询）"
 
             meta["scope_prompted"] = True
-    elif final_analysis.get('response_message'):
-        response_text = final_analysis['response_message']
     else:
         # Ready to execute
         try:

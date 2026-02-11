@@ -483,6 +483,7 @@ class AIService:
         context_time = context.get('time_range')
         context_scope = context.get('scope') or []
         scope_prompted = bool(context.get('scope_prompted'))
+        unsupported_kpi_notified = bool(context.get('unsupported_kpi_notified'))
 
         # 1. Pre-check for direct KPI matches (Exact or Keyword based)
         kpi_definitions = kpi_config.get('kpi_definitions', {})
@@ -545,6 +546,37 @@ class AIService:
                 new_kpi = kpi_key
                 break
         
+        # Generic fallback for unknown KPIs (e.g. "ot是多少", "查询abc")
+        if not new_kpi:
+            # Pattern: English/Numbers + "是多少"/"为多少"/"数量"/"统计" etc.
+            # Avoid matching pure numbers or dates
+            patterns = [
+                r"([A-Za-z0-9_]+(?:\s+[A-Za-z0-9_]+){1,4})\s*(?:是|为)\s*(?:多少|几|什么)",
+                r"([A-Za-z0-9_]+(?:\s+[A-Za-z0-9_]+){1,4})\s*(?:多少|几|什么)",
+                r"([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*(?:是|为)\s*(?:多少|几|什么)",
+                r"([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*(?:多少|几|什么)",
+                r"查询\s*([A-Za-z0-9_]+(?:\s+[A-Za-z0-9_]+){0,4}|[a-zA-Z0-9_\u4e00-\u9fa5]+)(?:\s|$)",
+                r"([a-zA-Z0-9_]+)\s*(?:的)?\s*(?:趋势|统计|分析|数据|结果)"
+            ]
+            for pat in patterns:
+                m = re.search(pat, query)
+                if m:
+                    candidate = m.group(1).strip()
+                    candidate = re.sub(r"\s+", " ", candidate)
+                    candidate = re.sub(r"(是|为)$", "", candidate)
+                    # Filter out non-KPI words
+                    stop_words = {
+                        "时间", "日期", "年份", "月份", "scope", "范围", "部门", "产品", "机台", 
+                        "这个", "那个", "它", "kpi", "指标", "结果", "数据", "sql", "sn",
+                        "今年", "去年", "明年", "本年", "全部", "所有"
+                    }
+                    if candidate.lower() not in stop_words and not re.fullmatch(r"\d+", candidate):
+                        # Also check if it looks like a date
+                        if not re.match(r"20\d{2}", candidate) and not candidate.upper().startswith("FY"):
+                            new_kpi = candidate
+                            print(f"Generic KPI extracted: {new_kpi}")
+                            break
+
         # Reset Logic: If a new KPI is detected, we treat it as a fresh question
         # UNLESS the new KPI is the same as the context KPI, then it might be a refinement.
         if new_kpi and new_kpi != context_kpi:
@@ -552,6 +584,7 @@ class AIService:
             matched_kpi = new_kpi
             found_scopes = []
             extracted_time = None # Time might need re-extraction
+            unsupported_kpi_notified = False
             
             # Re-extract time from the current query since we reset context
             # (Logic below will handle extraction, but we ensure we don't carry over old time)
@@ -562,7 +595,6 @@ class AIService:
             extracted_time = context_time
 
         # 2. Extract Time and Scope manually
-        import re
         from datetime import datetime
         known_products = ["CT", "3DI", "SPS", "ES", "SSP", "TPS", "TS", "FSI", "Certas", "SD", "Epion", "FPD"]
 
@@ -877,7 +909,7 @@ class AIService:
         基于当前上下文和用户新的查询，更新并提取 KPI、时间范围 (time_range) 和维度范围 (scope)。同时判断用户是否已经表达了“完成选择”或“不需要更多”的意图。
         
         [Rules]
-        1. KPI 识别：如果上下文已有 KPI 且查询未明确更改，请保持现状。
+        1. KPI 识别：如果上下文已有 KPI 且查询未明确更改，请保持现状。如果用户查询中包含看起来像指标的名词（特别是出现在“查询xx”、“xx是多少”、“xx的趋势”等句式中），即使它不在可选指标列表中，也请将其提取为 KPI。
         2. Scope 识别:
            - 识别具体的部门、团队、机台序列号。
            - 部门（如 "CT", "3DI", "SPS", "ES"）映射为 "product"。
@@ -979,6 +1011,66 @@ class AIService:
                     result['missing_scope_categories'] = missing_categories
                     if 'scope' not in missing:
                         missing.append('scope')
+        elif result['kpi']:
+            # KPI is present but NOT in definitions -> Unknown KPI
+
+            result["unsupported_kpi"] = True
+
+            all_scope_categories = [
+                item.get("value")
+                for item in (ui_mappings.get("scope_options", {}).get("categories", []) or [])
+                if isinstance(item, dict) and item.get("value")
+            ]
+            
+            # Check if scope is missing (since we don't know what scope is needed, we assume we need some unless user said finished)
+            if not result.get('scope') and not is_finished_selection:
+                if 'scope' not in missing:
+                    missing.append('scope')
+
+            base_msg = f"暂未支持指标 '{result['kpi']}' 的查询，已收集这个问题，并告知项目负责人。"
+
+            next_missing: List[str] = []
+            response_parts: List[str] = []
+
+            if not unsupported_kpi_notified:
+                response_parts.append(base_msg)
+                result["unsupported_kpi_notified"] = True
+            else:
+                result["unsupported_kpi_notified"] = True
+
+            if 'time_range' in missing:
+                next_missing = ['time_range']
+                response_parts.append("为了更好地评估该需求，请先补充需要的时间范围（例如：今年、2024年）。")
+            elif 'scope' in missing:
+                next_missing = ['scope']
+                if all_scope_categories:
+                    result["missing_scope_categories"] = all_scope_categories
+                response_parts.append("为了更好地评估该需求，请补充您希望查询的对象范围（如产品线、部门等，或者回答“无”）。")
+            else:
+                result["auto_new_conversation"] = True
+                recognized_parts: List[str] = []
+                if result.get('time_range'):
+                    recognized_parts.append(f"时间={result['time_range']}")
+                if result.get('scope'):
+                    scope_str = "/".join([s for s in result['scope'] if isinstance(s, str)])
+                    if scope_str:
+                        recognized_parts.append(f"对象范围={scope_str}")
+                if recognized_parts:
+                    response_parts.append("已收到补充信息：" + "；".join(recognized_parts) + "。我们会用于评估该需求。")
+                else:
+                    response_parts.append("已收到您的问题，我们会用于评估该需求。")
+            
+            # Log the request (record current state)
+            if db_service:
+                db_service.log_exception(query, result['time_range'], result['scope'])
+
+            result['response_message'] = "\n\n".join([p for p in response_parts if (p or "").strip()]).strip() or base_msg
+                
+            # Clear missing_params to prevent main.py from generating generic questions
+            # and to prevent entering the SQL generation phase (since response_message is set)
+            result['missing_params'] = next_missing
+            
+            return result
         else:
             # KPI Unknown: We need context (Time + Scope/Finished) before we fail.
             has_scope = len(result.get('scope', [])) > 0

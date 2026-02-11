@@ -71,6 +71,9 @@
 		sql?: string | null;
 		missing_params?: string[] | null;
 		missing_scope_categories?: string[] | null;
+		unsupported_kpi?: boolean | null;
+		unsupported_kpi_notified?: boolean | null;
+		auto_new_conversation?: boolean | null;
 	};
 
 	function decodeBottunMetaBase64(b64url: string): BottunMeta | null {
@@ -206,6 +209,8 @@
 
 	let bottunChartLoading = false;
 	let bottunHasData = false;
+	let bottunAutoNewConversationTriggered = false;
+	let bottunAutoResetAfterChart = false;
 
 	function formatBottunTimeRange(raw: string): string {
 		const s = (raw ?? '').trim();
@@ -281,7 +286,10 @@
 			missing_params: ['kpi'],
 			missing_scope_categories: null,
 			sql: null,
-			scope_prompted: false
+			scope_prompted: false,
+			unsupported_kpi: false,
+			unsupported_kpi_notified: false,
+			auto_new_conversation: false
 		};
 		const metaComment = `<!-- BOTTUN_META: ${encodeBottunMeta(resetMeta)} -->`;
 		await addMessages({
@@ -294,6 +302,23 @@
 				}
 			]
 		});
+	}
+
+	$: {
+		const shouldAutoNewConversation =
+			!bottunAutoNewConversationTriggered &&
+			(model?.info?.meta?.is_bottun_rule_bot ?? false) &&
+			!!bottunMeta?.auto_new_conversation &&
+			(isLastMessage ?? false) &&
+			(message?.done ?? false) &&
+			!readOnly;
+
+		if (shouldAutoNewConversation) {
+			bottunAutoNewConversationTriggered = true;
+			setTimeout(() => {
+				startBottunNewConversation();
+			}, 600);
+		}
 	}
 
 	function buildBottunDownloadUrl(meta: BottunMeta): string {
@@ -371,11 +396,32 @@
 				});
 				chart.dispose();
 
+				const resetMeta = {
+					kpi: null,
+					time_range: null,
+					scope: [],
+					missing_params: ['kpi'],
+					missing_scope_categories: null,
+					sql: null,
+					scope_prompted: false,
+					unsupported_kpi: false,
+					unsupported_kpi_notified: false,
+					auto_new_conversation: false
+				};
+				const metaComment = `<!-- BOTTUN_META: ${encodeBottunMeta(resetMeta)} -->`;
+
 				await addMessages({
 					modelId: message.model,
 					parentId: message.id,
-					messages: [{ role: 'assistant', content: `![Chart](${dataUrl})` }]
+					messages: [
+						{ role: 'assistant', content: `![Chart](${dataUrl})` },
+						{
+							role: 'assistant',
+							content: `已开始新对话。请问您想查询什么指标？\n\n${metaComment}`
+						}
+					]
 				});
+				bottunAutoResetAfterChart = true;
 			} finally {
 				document.body.removeChild(el);
 			}
@@ -1543,6 +1589,33 @@
 												>
 													<path
 														d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17"
+													/>
+												</svg>
+											</button>
+										</Tooltip>
+									{/if}
+
+									{#if model?.info?.meta?.is_bottun_rule_bot}
+										<Tooltip content="新对话" placement="bottom">
+											<button
+												aria-label="新对话"
+												class="{isLastMessage || ($settings?.highContrastMode ?? false)
+													? 'visible'
+													: 'invisible group-hover:visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition"
+												on:click={startBottunNewConversation}
+											>
+												<svg
+													xmlns="http://www.w3.org/2000/svg"
+													fill="none"
+													viewBox="0 0 24 24"
+													stroke-width="2.3"
+													stroke="currentColor"
+													class="w-4 h-4"
+												>
+													<path
+														stroke-linecap="round"
+														stroke-linejoin="round"
+														d="M12 4.5v15m7.5-7.5h-15"
 													/>
 												</svg>
 											</button>

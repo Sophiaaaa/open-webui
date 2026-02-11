@@ -11,6 +11,7 @@
 
 	let uiConfig: any = null;
 	let dynamicValues: Record<string, string[]> = {};
+	let lastFetchKey: Record<string, string> = {};
 	let loadingType: string | null = null;
 	let openDropdown: string | null = null;
 	let searchTerms: Record<string, string> = {};
@@ -84,7 +85,12 @@
 		}
 		openDropdown = dimensionType;
 
-		if (dynamicValues[dimensionType]) return;
+		const key = selectedScopes
+			.filter((s) => !s.startsWith(`${dimensionType}:`))
+			.slice()
+			.sort()
+			.join('|');
+		if (dynamicValues[dimensionType] && lastFetchKey[dimensionType] === key) return;
 
 		loadingType = dimensionType;
 		try {
@@ -100,11 +106,46 @@
 			if (res.ok) {
 				const data = await res.json();
 				dynamicValues = { ...dynamicValues, [dimensionType]: data.values };
+				lastFetchKey = { ...lastFetchKey, [dimensionType]: key };
 			}
 		} catch (e) {
 			console.error(e);
 		} finally {
 			loadingType = null;
+		}
+	}
+
+	function clearDependentState(changedCategory: string) {
+		const dependents =
+			changedCategory === 'product'
+				? ['organization', 'tools']
+				: changedCategory === 'organization'
+					? ['tools']
+					: [];
+		if (dependents.length === 0) return;
+
+		selectedScopes = selectedScopes.filter((s) => !dependents.includes(s.split(':')[0] ?? ''));
+
+		const nextDynamic: Record<string, string[]> = {};
+		for (const [k, v] of Object.entries(dynamicValues)) {
+			if (!dependents.includes(k)) nextDynamic[k] = v;
+		}
+		dynamicValues = nextDynamic;
+
+		const nextFetchKey: Record<string, string> = {};
+		for (const [k, v] of Object.entries(lastFetchKey)) {
+			if (!dependents.includes(k)) nextFetchKey[k] = v;
+		}
+		lastFetchKey = nextFetchKey;
+
+		const nextSearch: Record<string, string> = { ...searchTerms };
+		for (const dep of dependents) {
+			delete nextSearch[dep];
+		}
+		searchTerms = nextSearch;
+
+		if (openDropdown && dependents.includes(openDropdown)) {
+			openDropdown = null;
 		}
 	}
 
@@ -115,6 +156,7 @@
 		} else {
 			selectedScopes = [...selectedScopes, scopeStr];
 		}
+		clearDependentState(category);
 	}
 
 	function confirmSelection() {
@@ -156,7 +198,6 @@
 				{#if openDropdown === item.value}
 					<div
 						class="absolute top-full left-0 mt-1 w-56 bg-white dark:bg-gray-800 shadow-xl rounded-md border border-gray-200 dark:border-gray-700 z-50 p-2 max-h-80 overflow-y-auto"
-                        on:click|stopPropagation
 					>
 						<!-- Search -->
 						<div class="mb-2 px-1">

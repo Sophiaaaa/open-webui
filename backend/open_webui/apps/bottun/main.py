@@ -417,7 +417,7 @@ async def chat_completions(request: OpenAIChatCompletionRequest):
         if 'kpi' in missing:
             response_text = "请问您想查询什么指标？（例如：FE人数、机台数量等）"
         elif 'time_range' in missing:
-            response_text = f"请提供时间范围（例如：2024年，或者2024-2025）。"
+            response_text = "您好，请选择时间范围\n如需要自定义范围，请按此例填写202501-202506"
         elif 'scope' in missing:
              # Check for proactive scope
             if final_analysis.get('is_proactive_scope'):

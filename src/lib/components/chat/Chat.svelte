@@ -212,13 +212,13 @@
 		}
 	};
 
-	const onSelect = async (e) => {
-		const { type, data } = e;
+	const onSelect = async (e: { type: string; data: string; autoSubmit?: boolean }) => {
+		const { type, data, autoSubmit } = e;
 
 		if (type === 'prompt') {
 			// Handle prompt selection
 			messageInput?.setText(data, async () => {
-				if (!($settings?.insertSuggestionPrompt ?? false)) {
+				if (autoSubmit || !($settings?.insertSuggestionPrompt ?? false)) {
 					await tick();
 					submitPrompt(prompt);
 				}

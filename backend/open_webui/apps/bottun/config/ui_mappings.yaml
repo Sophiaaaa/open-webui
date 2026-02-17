@@ -39,5 +39,5 @@ scope_options:
       value: "organization"
     - label: "Individual"
       value: "individual"
-    - label: "Tools"
+    - label: "Tool SN"
       value: "tools"

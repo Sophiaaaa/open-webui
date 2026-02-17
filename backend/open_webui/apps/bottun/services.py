@@ -564,6 +564,17 @@ class AIService:
                     candidate = m.group(1).strip()
                     candidate = re.sub(r"\s+", " ", candidate)
                     candidate = re.sub(r"(是|为)$", "", candidate)
+                    candidate = re.sub(r"[，,。.!！？?；;:：]+$", "", candidate).strip()
+                    if re.search(r"[A-Za-z]", candidate):
+                        candidate = re.sub(r"(有|吗|呢|啊|呀|吧|的|么|啦|哈)+$", "", candidate).strip()
+                        if (
+                            candidate
+                            and re.search(r"[A-Za-z]", candidate)
+                            and re.search(r"[\u4e00-\u9fa5]$", candidate)
+                        ):
+                            trimmed = re.sub(r"[\u4e00-\u9fa5]+$", "", candidate).strip()
+                            if trimmed and re.fullmatch(r"[A-Za-z0-9_ ]+", trimmed):
+                                candidate = trimmed
                     # Filter out non-KPI words
                     stop_words = {
                         "时间", "日期", "年份", "月份", "scope", "范围", "部门", "产品", "机台", 
@@ -879,7 +890,7 @@ class AIService:
                 if s not in found_scopes:
                     found_scopes.append(s)
 
-        # 4. AI Analysis (Improved for natural language scope)
+        # 4. AI Analysis (optional; can be expensive/slow)
         kpi_info = {k: v.get('description', '') for k, v in kpi_definitions.items()}
         all_categories = ui_mappings.get('scope_options', {}).get('categories', [])
         
@@ -889,72 +900,76 @@ class AIService:
         else:
             available_scopes = [s['value'] for s in all_categories]
 
-        prompt = f"""
-        [Role]
-        你是一个专业的数据分析助手，负责从用户查询中提取关键参数。
-        
-        [Context]
-        1. 当前已识别参数 (Current Context):
-           - KPI: {matched_kpi}
-           - Time Range: {extracted_time}
-           - Scope: {json.dumps(found_scopes, ensure_ascii=False)}
-        2. 可选指标 (Available KPIs): {json.dumps(kpi_info, ensure_ascii=False)}
-        3. 可选维度分类 (Available Scopes categories): {available_scopes}
-        4. 当前日期: {current_date.strftime('%Y-%m-%d')}
-        
-        [User Query]
-        "{query}"
-        
-        [Instruction]
-        基于当前上下文和用户新的查询，更新并提取 KPI、时间范围 (time_range) 和维度范围 (scope)。同时判断用户是否已经表达了“完成选择”或“不需要更多”的意图。
-        
-        [Rules]
-        1. KPI 识别：如果上下文已有 KPI 且查询未明确更改，请保持现状。如果用户查询中包含看起来像指标的名词（特别是出现在“查询xx”、“xx是多少”、“xx的趋势”等句式中），即使它不在可选指标列表中，也请将其提取为 KPI。
-        2. Scope 识别:
-           - 识别具体的部门、团队、机台序列号。
-           - 部门（如 "CT", "3DI", "SPS", "ES"）映射为 "product"。
-           - 团队名称映射为 "organization"。
-           - 机台 SN（如 100367）映射为 "tools"。
-           - 格式必须为 "category:value"。
-        3. 否定意图识别 (Negative Intent Recognition):
-           - **重点**: 如果用户回答“没有”、“不用了”、“不需要”、“就这样”、“没了”、“所有”、“全部”、“跳过”等词汇，说明其不想再补充维度了。
-           - 在这种情况下，JSON 必须返回 `"finished_selection": true`。
-        4. 合并: 将新提取的内容与上下文合并。
-
-        5. 时间范围识别:
-           - 如果用户说“今年/本年”，按自然年转换为 "{current_year}01-{current_year}12"。
-           - 如果用户说“去年”，按自然年转换为 "{current_year - 1}01-{current_year - 1}12"。
-           - 如果用户说“明年”，按自然年转换为 "{current_year + 1}01-{current_year + 1}12"。
-           - 自然时间示例："2024年" -> "202401-202412"；"202505" -> "202505"；"25年3月份" -> "202503"；"25年第三季度" -> "202507-202509"。
-           - 财年示例（财年从4月到次年3月）："FY26" -> "202504-202603"；"FY26 2H" -> "202510-202603"。
-           - 如果用户明确表达“不筛选时间/不限制时间/不限时间/所有范围/全部范围/所有时间/全部时间/all time/any time”，time_range 返回 "all"。
-           - 兜底：如果用户只回复“所有/全部/不限/不限制/不限定”，且当前 time_range 为空，也视为 time_range="all"。
-        
-        [Output Format]
-        Return JSON ONLY:
-        {{
-            "kpi": "kpi_key",
-            "time_range": "time_value_or_null",
-            "scope": ["category:value", ...],
-            "finished_selection": true/false
-        }}
-        """
-        print(f"Analyzing intent with context for: {query}")
-        response_text = self.generate_response(prompt)
-        
         result = {"kpi": matched_kpi, "time_range": extracted_time, "scope": found_scopes, "missing_params": [], "finished_selection": False}
-        try:
-            start = response_text.find("{")
-            end = response_text.rfind("}") + 1
-            if start != -1 and end != -1:
-                ai_result = json.loads(response_text[start:end])
-                if ai_result.get('kpi'): result['kpi'] = ai_result['kpi']
-                if ai_result.get('time_range'): result['time_range'] = ai_result['time_range']
-                if ai_result.get('scope'): 
-                    result['scope'] = list(set(result.get('scope', []) + ai_result['scope']))
-                if ai_result.get('finished_selection'):
-                    result['finished_selection'] = True
-        except: pass
+        enable_llm_intent = os.getenv("BOTTUN_ENABLE_LLM_INTENT", "false").lower() == "true"
+        if enable_llm_intent:
+            prompt = f"""
+            [Role]
+            你是一个专业的数据分析助手，负责从用户查询中提取关键参数。
+            
+            [Context]
+            1. 当前已识别参数 (Current Context):
+               - KPI: {matched_kpi}
+               - Time Range: {extracted_time}
+               - Scope: {json.dumps(found_scopes, ensure_ascii=False)}
+            2. 可选指标 (Available KPIs): {json.dumps(kpi_info, ensure_ascii=False)}
+            3. 可选维度分类 (Available Scopes categories): {available_scopes}
+            4. 当前日期: {current_date.strftime('%Y-%m-%d')}
+            
+            [User Query]
+            "{query}"
+            
+            [Instruction]
+            基于当前上下文和用户新的查询，更新并提取 KPI、时间范围 (time_range) 和维度范围 (scope)。同时判断用户是否已经表达了“完成选择”或“不需要更多”的意图。
+            
+            [Rules]
+            1. KPI 识别：如果上下文已有 KPI 且查询未明确更改，请保持现状。如果用户查询中包含看起来像指标的名词（特别是出现在“查询xx”、“xx是多少”、“xx的趋势”等句式中），即使它不在可选指标列表中，也请将其提取为 KPI。
+            2. Scope 识别:
+               - 识别具体的部门、团队、机台序列号。
+               - 部门（如 "CT", "3DI", "SPS", "ES"）映射为 "product"。
+               - 团队名称映射为 "organization"。
+               - 机台 SN（如 100367）映射为 "tools"。
+               - 格式必须为 "category:value"。
+            3. 否定意图识别 (Negative Intent Recognition):
+               - **重点**: 如果用户回答“没有”、“不用了”、“不需要”、“就这样”、“没了”、“所有”、“全部”、“跳过”等词汇，说明其不想再补充维度了。
+               - 在这种情况下，JSON 必须返回 `"finished_selection": true`。
+            4. 合并: 将新提取的内容与上下文合并。
+    
+            5. 时间范围识别:
+               - 如果用户说“今年/本年”，按自然年转换为 "{current_year}01-{current_year}12"。
+               - 如果用户说“去年”，按自然年转换为 "{current_year - 1}01-{current_year - 1}12"。
+               - 如果用户说“明年”，按自然年转换为 "{current_year + 1}01-{current_year + 1}12"。
+               - 自然时间示例："2024年" -> "202401-202412"；"202505" -> "202505"；"25年3月份" -> "202503"；"25年第三季度" -> "202507-202509"。
+               - 财年示例（财年从4月到次年3月）："FY26" -> "202504-202603"；"FY26 2H" -> "202510-202603"。
+               - 如果用户明确表达“不筛选时间/不限制时间/不限时间/所有范围/全部范围/所有时间/全部时间/all time/any time”，time_range 返回 "all"。
+               - 兜底：如果用户只回复“所有/全部/不限/不限制/不限定”，且当前 time_range 为空，也视为 time_range="all"。
+            
+            [Output Format]
+            Return JSON ONLY:
+            {{
+                "kpi": "kpi_key",
+                "time_range": "time_value_or_null",
+                "scope": ["category:value", ...],
+                "finished_selection": true/false
+            }}
+            """
+            print(f"Analyzing intent with context for: {query}")
+            response_text = self.generate_response(prompt)
+            try:
+                start = response_text.find("{")
+                end = response_text.rfind("}") + 1
+                if start != -1 and end != -1:
+                    ai_result = json.loads(response_text[start:end])
+                    if ai_result.get('kpi'):
+                        result['kpi'] = ai_result['kpi']
+                    if ai_result.get('time_range'):
+                        result['time_range'] = ai_result['time_range']
+                    if ai_result.get('scope'):
+                        result['scope'] = list(set(result.get('scope', []) + ai_result['scope']))
+                    if ai_result.get('finished_selection'):
+                        result['finished_selection'] = True
+            except:
+                pass
 
         # --- Proactive Missing Params Logic ---
         missing = []
@@ -1027,7 +1042,10 @@ class AIService:
                 if 'scope' not in missing:
                     missing.append('scope')
 
-            base_msg = f"暂未支持指标 '{result['kpi']}' 的查询，已收集这个问题，并告知项目负责人。"
+            base_msg = (
+                f"暂未支持指标 '{result['kpi']}' 的查询。"
+                "我们希望完整收集您的需求并同步给负责人。"
+            )
 
             next_missing: List[str] = []
             response_parts: List[str] = []
@@ -1040,12 +1058,16 @@ class AIService:
 
             if 'time_range' in missing:
                 next_missing = ['time_range']
-                response_parts.append("为了更好地评估该需求，请先补充需要的时间范围（例如：今年、2024年）。")
+                response_parts.append(
+                    "可以在补充一下时间范围吗？可点击下方快捷按钮，也可以自定义时间范围，示例：202501-202506."
+                )
             elif 'scope' in missing:
                 next_missing = ['scope']
                 if all_scope_categories:
                     result["missing_scope_categories"] = all_scope_categories
-                response_parts.append("为了更好地评估该需求，请补充您希望查询的对象范围（如产品线、部门等，或者回答“无”）。")
+                response_parts.append(
+                    "为了更好地评估该需求，也请补充您希望查询的对象范围（如产品线、部门等；如无请回复“无”）。"
+                )
             else:
                 result["auto_new_conversation"] = True
                 recognized_parts: List[str] = []
@@ -1284,7 +1306,6 @@ class AIService:
             "Hour": "总工时",
             "Sets": "总台数",
             "SUHourperTool": "平均每台装机工时",
-            "total_startup_hours": "总Startup工时",
             "total_prewarranty_hours": "总Pre-warranty工时"
         }
         col_to_label.update(friendly_names)
@@ -1311,16 +1332,17 @@ class AIService:
                     v = row.get('value', '')
                     v_str = f"**{v}**" if isinstance(v, (int, float)) else str(v)
                     table += f"| {m} | {v_str} |\n"
+                table += "\n\n需要补充明细或者图表吗？"
                 return table
             
             if len(data) == 1:
                 row = data[0]
                 if len(row) == 1:
                     val = list(row.values())[0]
-                    return f"为您查到，{kpi_desc}的结果是：**{val}**。"
+                    return f"为您查到，{kpi_desc}的结果是：**{val}**。\n\n需要补充明细或者图表吗？"
                 else:
                     details = "，".join([f"{get_friendly_name(k)}为 {v}" for k, v in row.items()])
-                    return f"为您查到：{details}。"
+                    return f"为您查到：{details}。\n\n需要补充明细或者图表吗？"
 
             # Multiple rows - Format as a Markdown Table
             columns = list(data[0].keys())
@@ -1343,6 +1365,7 @@ class AIService:
                         row_values.append(str(val))
                 table += "| " + " | ".join(row_values) + " |\n"
             
+            table += "\n\n需要补充明细或者图表吗？"
             return table
 
         # Fallback to AI for very complex data if needed
@@ -1373,4 +1396,4 @@ class AIService:
         if "</think>" in summary:
             summary = summary.split("</think>")[-1].strip()
             
-        return summary or "查询完成。"
+        return (summary or "查询完成。") + "\n\n需要补充明细或者图表吗？"

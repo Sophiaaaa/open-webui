@@ -2,25 +2,36 @@
 	import Fuse from 'fuse.js';
 	import Bolt from '$lib/components/icons/Bolt.svelte';
 	import { onMount, getContext } from 'svelte';
+	import type { Writable } from 'svelte/store';
+	import type { i18n as i18nType } from 'i18next';
 	import { settings, WEBUI_NAME } from '$lib/stores';
 	import { WEBUI_VERSION } from '$lib/constants';
 
-	const i18n = getContext('i18n');
+	type SuggestionPrompt = {
+		id?: string;
+		title?: string[];
+		content: string;
+		auto_submit?: boolean;
+	};
 
-	export let suggestionPrompts = [];
+	type SuggestionSelectEvent = { type: 'prompt'; data: string; autoSubmit?: boolean };
+
+	const i18n = getContext<Writable<i18nType>>('i18n');
+
+	export let suggestionPrompts: SuggestionPrompt[] = [];
 	export let className = '';
 	export let inputValue = '';
-	export let onSelect = (e) => {};
+	export let onSelect = (e: SuggestionSelectEvent) => {};
 
-	let sortedPrompts = [];
+	let sortedPrompts: SuggestionPrompt[] = [];
 
 	const fuseOptions = {
 		keys: ['content', 'title'],
 		threshold: 0.5
 	};
 
-	let fuse;
-	let filteredPrompts = [];
+	let fuse: Fuse<SuggestionPrompt> | null = null;
+	let filteredPrompts: SuggestionPrompt[] = [];
 
 	// Initialize Fuse
 	$: fuse = new Fuse(sortedPrompts, fuseOptions);
@@ -31,7 +42,7 @@
 
 	// Helper function to check if arrays are the same
 	// (based on unique IDs oder content)
-	function arraysEqual(a, b) {
+	function arraysEqual(a: SuggestionPrompt[], b: SuggestionPrompt[]) {
 		if (a.length !== b.length) return false;
 		for (let i = 0; i < a.length; i++) {
 			if ((a[i].id ?? a[i].content) !== (b[i].id ?? b[i].content)) {
@@ -41,7 +52,7 @@
 		return true;
 	}
 
-	const getFilteredPrompts = (inputValue) => {
+	const getFilteredPrompts = (inputValue: string) => {
 		if (inputValue.length > 500) {
 			filteredPrompts = [];
 		} else {
@@ -92,7 +103,14 @@
 				       px-3 py-2 rounded-xl bg-transparent hover:bg-black/5
 				       dark:hover:bg-white/5 transition group"
 					style="animation-delay: {idx * 60}ms"
-					on:click={() => onSelect({ type: 'prompt', data: prompt.content })}
+					on:click={() =>
+						onSelect({
+							type: 'prompt',
+							data: prompt.content,
+							autoSubmit:
+								Boolean(prompt?.auto_submit) ||
+								(typeof prompt?.content === 'string' && prompt.content.endsWith('是多少'))
+						})}
 				>
 					<div class="flex flex-col text-left">
 						{#if prompt.title && prompt.title[0] !== ''}

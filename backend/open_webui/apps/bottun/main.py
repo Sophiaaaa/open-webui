@@ -129,6 +129,18 @@ def get_dimension_values(request: DimensionRequest):
         
     # Pass filters to get_unique_values
     filters = {}
+
+    # 1. Apply configured dimension filters (e.g. st_SUFlag='TA' for tools)
+    dim_filters_config = kpi_def.get('dimension_filters', {})
+    extra_filters = dim_filters_config.get(request.dimension_type, {})
+    if extra_filters:
+        for col, val in extra_filters.items():
+            if isinstance(val, list):
+                filters.setdefault(col, []).extend(val)
+            else:
+                filters.setdefault(col, []).append(val)
+
+    # 2. Apply cascading filters from current selection
     if request.current_selection:
         scope_cols = kpi_def.get('scope_columns', {})
         for s in request.current_selection:
@@ -329,39 +341,41 @@ async def chat_completions(request: OpenAIChatCompletionRequest):
     if not request.messages:
         raise HTTPException(status_code=400, detail="No messages provided")
     
-    # 2. Replay history to build context
+    # 2. Build context from latest assistant meta (avoid replaying history through LLM)
     current_context = {}
     kpi_config = config_service.get_kpi_config()
     ui_mappings = config_service.get_ui_mappings()
     
-    analysis = {}
-    
-    # Iterate through messages to build up context state
-    for msg in request.messages:
-        if msg.role == "assistant":
-            meta = _extract_bottun_meta(msg.content)
-            if meta:
-                if "kpi" in meta:
-                    current_context["kpi"] = meta.get("kpi")
-                if "time_range" in meta:
-                    current_context["time_range"] = meta.get("time_range")
-                if "scope" in meta:
-                    current_context["scope"] = meta.get("scope") if isinstance(meta.get("scope"), list) else []
-                if meta.get("scope_prompted") is not None:
-                    current_context["scope_prompted"] = bool(meta.get("scope_prompted"))
-                if meta.get("unsupported_kpi_notified") is not None:
-                    current_context["unsupported_kpi_notified"] = bool(meta.get("unsupported_kpi_notified"))
-
+    latest_user_msg = None
+    for msg in reversed(request.messages):
         if msg.role == "user":
-            analysis = ai_service.analyze_intent(msg.content, kpi_config, ui_mappings, current_context, db_service)
-            current_context = {
-                "kpi": analysis.get("kpi"),
-                "time_range": analysis.get("time_range"),
-                "scope": analysis.get("scope"),
-                "scope_prompted": current_context.get("scope_prompted"),
-            }
-            
-    final_analysis = analysis
+            latest_user_msg = msg
+            break
+    if not latest_user_msg:
+        raise HTTPException(status_code=400, detail="No user message provided")
+
+    for msg in reversed(request.messages):
+        if msg.role != "assistant":
+            continue
+        meta = _extract_bottun_meta(msg.content)
+        if not meta:
+            continue
+
+        if "kpi" in meta:
+            current_context["kpi"] = meta.get("kpi")
+        if "time_range" in meta:
+            current_context["time_range"] = meta.get("time_range")
+        if "scope" in meta:
+            current_context["scope"] = meta.get("scope") if isinstance(meta.get("scope"), list) else []
+        if meta.get("scope_prompted") is not None:
+            current_context["scope_prompted"] = bool(meta.get("scope_prompted"))
+        if meta.get("unsupported_kpi_notified") is not None:
+            current_context["unsupported_kpi_notified"] = bool(meta.get("unsupported_kpi_notified"))
+        break
+
+    final_analysis = ai_service.analyze_intent(
+        latest_user_msg.content, kpi_config, ui_mappings, current_context, db_service
+    )
     response_text = ""
     meta: Dict[str, Any] = {
         "kpi": final_analysis.get("kpi"),
@@ -417,7 +431,7 @@ async def chat_completions(request: OpenAIChatCompletionRequest):
         if 'kpi' in missing:
             response_text = "请问您想查询什么指标？（例如：FE人数、机台数量等）"
         elif 'time_range' in missing:
-            response_text = "您好，请选择时间范围\n如需要自定义范围，请按此例填写202501-202506"
+            response_text = "您好，请选择时间范围  \n如需要自定义范围，请按此例填写202501-202506"
         elif 'scope' in missing:
              # Check for proactive scope
             if final_analysis.get('is_proactive_scope'):
@@ -434,7 +448,7 @@ async def chat_completions(request: OpenAIChatCompletionRequest):
                 if recognized:
                     response_text = f"已识别到对象范围：{recognized}。请问还需要补充其他对象范围吗？（回答“没有/不需要/就这样/全部”即可开始查询）"
                 else:
-                    response_text = "请问这就足够了吗？还需要限制其他部门或产品吗？（回答“没有”开始查询）"
+                    response_text = "您好，请选择对象范围"
 
             meta["scope_prompted"] = True
     else:

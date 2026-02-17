@@ -95,7 +95,7 @@ from open_webui.routers import (
     scim,
 )
 
-from open_webui.apps.bottun.main import app as bottun_app
+from open_webui.apps.bots.runtime_config import load_bots_runtime_config
 
 from open_webui.routers.retrieval import (
     get_embedding_function,
@@ -605,6 +605,7 @@ async def lifespan(app: FastAPI):
     # when the first user lands on the / route.
     log.info("Installing external dependencies of functions and tools...")
     install_tool_and_function_dependencies()
+    log.info("Tool/function dependency installation finished.")
 
     app.state.redis = get_redis_connection(
         redis_url=REDIS_URL,
@@ -614,6 +615,7 @@ async def lifespan(app: FastAPI):
         redis_cluster=REDIS_CLUSTER,
         async_mode=True,
     )
+    log.info(f"Redis enabled: {app.state.redis is not None}")
 
     if app.state.redis is not None:
         app.state.redis_task_command_listener = asyncio.create_task(
@@ -626,7 +628,12 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(periodic_usage_pool_cleanup())
 
-    if app.state.config.ENABLE_BASE_MODELS_CACHE:
+    skip_base_models_warmup = os.environ.get("SKIP_BASE_MODELS_WARMUP", "False").lower() == "true"
+    log.info(
+        f"ENABLE_BASE_MODELS_CACHE={app.state.config.ENABLE_BASE_MODELS_CACHE} "
+        f"SKIP_BASE_MODELS_WARMUP={skip_base_models_warmup}"
+    )
+    if app.state.config.ENABLE_BASE_MODELS_CACHE and not skip_base_models_warmup:
         await get_all_models(
             Request(
                 # Creating a mock request object to pass to get_all_models
@@ -2387,7 +2394,22 @@ async def healthcheck_with_db():
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-app.mount("/bottun", bottun_app)
+
+_bots_runtime = load_bots_runtime_config()
+if _bots_runtime.enable_kpi_bot:
+    from open_webui.apps.bottun.main import app as bottun_app
+
+    app.mount("/bottun", bottun_app)
+
+if _bots_runtime.enable_bkm_bot:
+    from open_webui.apps.bkm.main import app as bkm_app
+
+    bkm_app.state.EMBEDDING_FUNCTION = app.state.EMBEDDING_FUNCTION
+    bkm_app.state.RERANKING_FUNCTION = app.state.RERANKING_FUNCTION
+    bkm_app.state.EMBEDDING_CACHE_KEY = f"{app.state.config.RAG_EMBEDDING_ENGINE}:{app.state.config.RAG_EMBEDDING_MODEL}"
+    bkm_app.state.RERANKING_CACHE_KEY = f"{app.state.config.RAG_RERANKING_ENGINE}:{app.state.config.RAG_RERANKING_MODEL}"
+
+    app.mount("/bkm", bkm_app)
 
 
 @app.get("/cache/{path:path}")

@@ -828,51 +828,42 @@ load_oauth_providers()
 
 STATIC_DIR = Path(os.getenv("STATIC_DIR", OPEN_WEBUI_DIR / "static")).resolve()
 
+frontend_static_dir = (FRONTEND_BUILD_DIR / "static").resolve()
+
 try:
-    if STATIC_DIR.exists():
+    if frontend_static_dir.exists() and STATIC_DIR.exists():
         for item in STATIC_DIR.iterdir():
             if item.is_file() or item.is_symlink():
                 try:
                     item.unlink()
-                except Exception as e:
+                except Exception:
                     pass
 except Exception as e:
     pass
 
-for file_path in (FRONTEND_BUILD_DIR / "static").glob("**/*"):
-    if file_path.is_file():
-        target_path = STATIC_DIR / file_path.relative_to(
-            (FRONTEND_BUILD_DIR / "static")
-        )
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            shutil.copyfile(file_path, target_path)
-        except Exception as e:
-            logging.error(f"An error occurred: {e}")
-
-frontend_favicon = FRONTEND_BUILD_DIR / "static" / "favicon.png"
-
-if frontend_favicon.exists():
-    try:
-        shutil.copyfile(frontend_favicon, STATIC_DIR / "favicon.png")
-    except Exception as e:
-        logging.error(f"An error occurred: {e}")
-
-frontend_splash = FRONTEND_BUILD_DIR / "static" / "splash.png"
-
-if frontend_splash.exists():
-    try:
-        shutil.copyfile(frontend_splash, STATIC_DIR / "splash.png")
-    except Exception as e:
-        logging.error(f"An error occurred: {e}")
-
-frontend_loader = FRONTEND_BUILD_DIR / "static" / "loader.js"
-
-if frontend_loader.exists():
-    try:
-        shutil.copyfile(frontend_loader, STATIC_DIR / "loader.js")
-    except Exception as e:
-        logging.error(f"An error occurred: {e}")
+if frontend_static_dir.exists():
+    for file_path in frontend_static_dir.glob("**/*"):
+        if file_path.is_file():
+            target_path = STATIC_DIR / file_path.relative_to(frontend_static_dir)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copyfile(file_path, target_path)
+            except Exception as e:
+                logging.error(f"An error occurred: {e}")
+else:
+    dev_static_dir = (OPEN_WEBUI_DIR.parent.parent / "static" / "static").resolve()
+    if dev_static_dir.exists():
+        for file_path in dev_static_dir.glob("**/*"):
+            if not file_path.is_file():
+                continue
+            target_path = STATIC_DIR / file_path.name
+            if target_path.exists():
+                continue
+            try:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(file_path, target_path)
+            except Exception:
+                pass
 
 
 ####################################
@@ -1174,8 +1165,9 @@ except Exception as e:
 if default_prompt_suggestions == []:
     default_prompt_suggestions = [
         {
-            "title": ["SU Hour per Tool 平均装机小时数", "增加时间和范围，例如当前财年的CT的SU Hour per Tool有多少"],
+            "title": ["SU Hour per Tool 平均装机小时数", "SU Hour per Tool 平均装机小时数是多少"],
             "content": "SU Hour per Tool 平均装机小时数是多少",
+            "auto_submit": True,
         }
     ]
 

@@ -1,6 +1,6 @@
 tables:
   - name: "dws_tas_roster"
-    description: "员工花名册（包含正式员工和外协）。包含 st_WrMonth 标识的历史版本。Employee roster table (employees and outsourced)."
+    description: "员工花名册（包含正式员工和外包）。包含 st_WrMonth 标识的历史版本。Employee roster table (employees and outsourced)."
     columns:
       - name: "st_EmpID"
         type: "VARCHAR(6)"
@@ -144,20 +144,6 @@ tables:
         description: "设备装机的状态。SU Flag (e.g., UnderSU, TA)."
 
 kpi_definitions:
-  headcount:
-    description: "在职人数统计。Total number of active employees (st_EmpAvailable='1')."
-    table_name: "dws_tas_roster"
-    time_column: "st_WrMonth"
-    allowed_scopes: ["product", "organization", "individual"]
-    scope_columns:
-      organization: "st_OrgName"
-      product: "st_DeptName"
-      individual: "st_EmpID"
-    sql_template: |
-      SELECT COUNT(DISTINCT st_EmpID) 
-      FROM dws_tas_roster 
-      WHERE st_EmpAvailable = '1' 
-      {conditions}
   
   fe_count:
     description: "FE人数统计, Field Engineer (FE) count. Keywords: FE, Field Engineer, FE人数, FE数量."
@@ -176,7 +162,7 @@ kpi_definitions:
       {conditions}
 
   os_count:
-    description: "OS人数统计, Outsourced Staff (OS) count. Keywords: OS, Outsourced, 外协人数, 外协数量."
+    description: "OS人数统计, Outsourced Staff (OS) count. Keywords: OS, Outsourced, 外包人数, 外包数量."
     table_name: "dws_tas_roster"
     time_column: "st_WrMonth"
     allowed_scopes: ["product", "organization", "individual"]
@@ -204,40 +190,7 @@ kpi_definitions:
       SELECT COUNT(DISTINCT st_SN) 
       FROM dws_wisdom_machine 
       WHERE st_MachineClusterFlag = 'R'
-      {conditions}
-
-  chamber_count:
-    description: "Chamber数量统计。Total number of chambers (st_MachineClusterFlag='C')."
-    table_name: "dws_wisdom_machine"
-    time_column: "st_WrMonth"
-    allowed_scopes: ["product", "organization", "tools"]
-    scope_columns:
-      organization: "st_BU"
-      product: "st_ProductLine"
-      tools: "st_SN"
-    sql_template: |
-      SELECT COUNT(DISTINCT st_SN) 
-      FROM dws_wisdom_machine 
-      WHERE st_MachineClusterFlag = 'C'
-      {conditions}
-
-  startup_hours:
-    description: "设备装机工时统计。Startup and Pre-warranty hours summary."
-    table_name: "dws_navi_SE_SUHourperTool_Realtime"
-    time_column: "st_Month"
-    allowed_scopes: ["product", "organization", "tools"]
-    scope_columns:
-      product: "st_ProductLine"
-      organization: "st_sn_org_teamname"
-      tools: "st_SN"
-    sql_template: |
-      SELECT 
-        SUM(d_StartupHour) as total_startup_hours,
-        SUM(d_PreWarrantyHour) as total_prewarranty_hours
-      FROM dws_navi_SE_SUHourperTool_Realtime 
-      WHERE st_MachineMachineHistory = 'New' 
-      AND st_SUFlag = 'TA' 
-      {conditions}
+      {conditions} 
 
   su_hour_per_tool:
     description: "每机台装机时间 (SU Hour per Tool)。Keywords: SU Hour per Tool, 平均每台装机结果, Startup Hour per Tool."
@@ -248,6 +201,9 @@ kpi_definitions:
       product: "st_ProductLine"
       organization: "st_sn_org_teamname"
       tools: "st_SN"
+    dimension_filters:
+      tools:
+        st_SUFlag: ["TA"]
     sql_template: |
       SELECT 
         round(SUM(d_StartupHour) + SUM(d_PreWarrantyHour), 2) / NULLIF(COUNT(DISTINCT st_SN), 2) as 'SUHourperTool' 

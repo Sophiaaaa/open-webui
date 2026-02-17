@@ -1,0 +1,6 @@
+bots:
+  kpi_bot:
+    enabled: true
+  bkm_bot:
+    enabled: true
+

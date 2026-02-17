@@ -1,0 +1,71 @@
+{
+  "items": [
+    {
+      "id": "sample-001",
+      "title": "RF Match 异常导致功率不稳定",
+      "problem_description": "设备在点火后功率读数波动，伴随 RF Match 报警。",
+      "pairs": [
+        {
+          "action": "检查 RF Match 连接线与接地，重新插拔并做绝缘检查；必要时更换 RF Match 电缆。",
+          "root_cause": "RF Match 连接松动/接地不良导致匹配网络不稳定。",
+          "evidence": "手册建议优先排查 RF 匹配链路的连接与接地状态。",
+          "data_source": {
+            "pdf": "bkm_sample.pdf",
+            "pages": [
+              1
+            ]
+          }
+        },
+        {
+          "action": "查看 RF Generator 输出与反射功率趋势，确认是否存在过反射；按流程校准 RF。",
+          "root_cause": "RF Generator 校准偏移或反射功率过高触发保护，造成输出不稳。",
+          "evidence": "当反射功率异常时，输出会进入保护/限功率模式。",
+          "data_source": {
+            "pdf": "bkm_sample.pdf",
+            "pages": [
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "sample-002",
+      "title": "真空抽速偏低导致 Base Pressure 超标",
+      "question": "设备无法达到目标 Base Pressure，抽真空时间明显变长。",
+      "action": [
+        "检查 foreline 泄漏（肥皂水/检漏仪），确认阀门开关状态与 O-ring 完整性。",
+        "检查 Pump 状态与保养周期，查看是否需要更换油/滤芯（如适用）。"
+      ],
+      "root_cause": [
+        "foreline 泄漏或阀门密封不良造成持续进气。",
+        "泵效率下降或维护不到位导致抽速不足。"
+      ],
+      "data_source": {
+        "pdf": "bkm_sample.pdf",
+        "pages": [
+          2
+        ]
+      }
+    },
+    {
+      "id": "sample-003",
+      "title": "温控过冲导致工艺温度不稳定",
+      "problem": "温控到达设定点后发生过冲，随后来回振荡。",
+      "pairs": [
+        {
+          "action": "检查温控 PID 参数与自整定结果，按手册推荐范围回退并逐步微调。",
+          "root_cause": "PID 参数过激导致过冲与振荡。",
+          "evidence": "当积分项过大时容易出现过冲，需降低积分增益。",
+          "data_source": {
+            "pdf": "bkm_sample.pdf",
+            "pages": [
+              3
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
+

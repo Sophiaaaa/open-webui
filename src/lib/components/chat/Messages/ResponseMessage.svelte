@@ -24,6 +24,7 @@
 		TTSWorker,
 		user
 	} from '$lib/stores';
+	import { currentDate } from '$lib/stores/now';
 	import { synthesizeOpenAISpeech } from '$lib/apis/audio';
 	import { imageGenerations } from '$lib/apis/images';
 	import {
@@ -63,12 +64,14 @@
 	import StatusHistory from './ResponseMessage/StatusHistory.svelte';
 	import FullHeightIframe from '$lib/components/common/FullHeightIframe.svelte';
 	import ScopeSelector from './ResponseMessage/ScopeSelector.svelte';
+	import BottunChart from './ResponseMessage/BottunChart.svelte';
 
 	type BottunMeta = {
 		kpi?: string | null;
 		time_range?: string | null;
 		scope?: string[] | null;
 		sql?: string | null;
+		chart?: { type?: string | null; title?: string | null; months?: string[] | null; values?: number[] | null } | null;
 		missing_params?: string[] | null;
 		missing_scope_categories?: string[] | null;
 		unsupported_kpi?: boolean | null;
@@ -212,6 +215,44 @@
 	let bottunAutoNewConversationTriggered = false;
 	let bottunAutoResetAfterChart = false;
 
+	function getCurrentFiscalYearOption(now = dayjs()) {
+		const year = now.year();
+		const month = now.month() + 1;
+		const startYear = month >= 4 ? year : year - 1;
+		const endYear = startYear + 1;
+		const start = `${startYear}04`;
+		const end = `${endYear}03`;
+		const label = `FY${String(endYear).slice(-2)}`;
+		return { label, range: `${start}-${end}` };
+	}
+
+	function getCurrentFiscalHalfYearOption(now = dayjs()) {
+		const year = now.year();
+		const month = now.month() + 1;
+		const startYear = month >= 4 ? year : year - 1;
+		const endYear = startYear + 1;
+
+		const fy = `FY${String(endYear).slice(-2)}`;
+		const isFirstHalf = month >= 4 && month <= 9;
+		if (isFirstHalf) {
+			return {
+				label: `${fy}-1H`,
+				range: `${startYear}04-${startYear}09`
+			};
+		}
+
+		return {
+			label: `${fy}-2H`,
+			range: `${startYear}10-${endYear}03`
+		};
+	}
+
+	let currentFiscalYearOption = getCurrentFiscalYearOption();
+	$: currentFiscalYearOption = getCurrentFiscalYearOption(dayjs($currentDate));
+
+	let currentFiscalHalfYearOption = getCurrentFiscalHalfYearOption();
+	$: currentFiscalHalfYearOption = getCurrentFiscalHalfYearOption(dayjs($currentDate));
+
 	function formatBottunTimeRange(raw: string): string {
 		const s = (raw ?? '').trim();
 		if (!s) return '';
@@ -250,12 +291,20 @@
 	function computeBottunHasData() {
 		try {
 			const table = contentContainerElement?.querySelector('table');
-			if (!table) {
+			if (table) {
+				const rows = table.querySelectorAll('tbody tr');
+				bottunHasData = rows.length > 0;
+				return;
+			}
+
+			const text = (contentContainerElement?.textContent ?? '').trim();
+			if (!text) {
 				bottunHasData = false;
 				return;
 			}
-			const rows = table.querySelectorAll('tbody tr');
-			bottunHasData = rows.length > 0;
+			const pairRe =
+				/month\s*(?:为|=|:)\s*([0-9]{6})[\s,，;；]*value\s*(?:为|=|:)\s*([+-]?\d+(?:\.\d+)?)/gi;
+			bottunHasData = pairRe.test(text);
 		} catch {
 			bottunHasData = false;
 		}
@@ -335,96 +384,55 @@
 		if (!bottunMeta?.kpi) return;
 		bottunChartLoading = true;
 		try {
-			const table = contentContainerElement?.querySelector('table');
-			if (!table) {
-				throw new globalThis.Error('未找到结果表格，无法生成图片');
-			}
-
-			const ths = Array.from(table.querySelectorAll('thead th'));
-			const title = (ths[1]?.textContent ?? '').trim() || bottunMeta.kpi;
-
-			const rows = Array.from(table.querySelectorAll('tbody tr'));
 			const months: string[] = [];
 			const values: number[] = [];
-			for (const tr of rows) {
-				const tds = Array.from(tr.querySelectorAll('td'));
-				const month = (tds[0]?.textContent ?? '').trim();
-				const rawVal = (tds[1]?.textContent ?? '').trim();
-				if (!month || !rawVal) continue;
-				const v = Number.parseFloat(rawVal);
-				if (Number.isNaN(v)) continue;
-				months.push(month);
-				values.push(v);
+			let title = bottunMeta.kpi;
+
+			const table = contentContainerElement?.querySelector('table');
+			if (table) {
+				const ths = Array.from(table.querySelectorAll('thead th'));
+				title = (ths[1]?.textContent ?? '').trim() || bottunMeta.kpi;
+
+				const rows = Array.from(table.querySelectorAll('tbody tr'));
+				for (const tr of rows) {
+					const tds = Array.from(tr.querySelectorAll('td'));
+					const month = (tds[0]?.textContent ?? '').trim();
+					const rawVal = (tds[1]?.textContent ?? '').trim();
+					if (!month || !rawVal) continue;
+					const v = Number.parseFloat(rawVal);
+					if (Number.isNaN(v)) continue;
+					months.push(month);
+					values.push(v);
+				}
+			} else {
+				const text = (contentContainerElement?.textContent ?? '').trim();
+				const pairRe =
+					/month\s*(?:为|=|:)\s*([0-9]{6})[\s,，;；]*value\s*(?:为|=|:)\s*([+-]?\d+(?:\.\d+)?)/gi;
+				for (const m of text.matchAll(pairRe)) {
+					const month = (m[1] ?? '').trim();
+					const rawVal = (m[2] ?? '').trim();
+					if (!month || !rawVal) continue;
+					const v = Number.parseFloat(rawVal);
+					if (Number.isNaN(v)) continue;
+					months.push(month);
+					values.push(v);
+				}
 			}
 
 			if (months.length === 0 || values.length === 0) {
-				throw new globalThis.Error('表格中没有可绘制的数据');
+				throw new globalThis.Error('未找到可绘制的数据');
 			}
 
-			const echarts = await import('echarts');
-			const el = document.createElement('div');
-			el.style.width = '860px';
-			el.style.height = '360px';
-			el.style.position = 'fixed';
-			el.style.left = '-10000px';
-			el.style.top = '0';
-			document.body.appendChild(el);
-
-			try {
-				const chart = echarts.init(el);
-				chart.setOption({
-					title: { text: title, left: 'center' },
-					tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-					grid: { left: 48, right: 24, top: 56, bottom: 32 },
-					xAxis: {
-						type: 'category',
-						data: months,
-						axisLabel: { rotate: 0 }
-					},
-					yAxis: { type: 'value' },
-					series: [{ type: 'bar', data: values, barMaxWidth: 28 }]
-				});
-				chart.resize();
-				await new Promise<void>((resolve) =>
-					requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
-				);
-
-				const dataUrl = chart.getDataURL({
-					type: 'png',
-					pixelRatio: 2,
-					backgroundColor: '#ffffff'
-				});
-				chart.dispose();
-
-				const resetMeta = {
-					kpi: null,
-					time_range: null,
-					scope: [],
-					missing_params: ['kpi'],
-					missing_scope_categories: null,
-					sql: null,
-					scope_prompted: false,
-					unsupported_kpi: false,
-					unsupported_kpi_notified: false,
-					auto_new_conversation: false
-				};
-				const metaComment = `<!-- BOTTUN_META: ${encodeBottunMeta(resetMeta)} -->`;
-
-				await addMessages({
-					modelId: message.model,
-					parentId: message.id,
-					messages: [
-						{ role: 'assistant', content: `![Chart](${dataUrl})` },
-						{
-							role: 'assistant',
-							content: `已开始新对话。请问您想查询什么指标？\n\n${metaComment}`
-						}
-					]
-				});
-				bottunAutoResetAfterChart = true;
-			} finally {
-				document.body.removeChild(el);
-			}
+			const chartMeta = {
+				chart: { type: 'bar', title, months, values },
+				auto_new_conversation: true
+			};
+			const metaComment = `<!-- BOTTUN_META: ${encodeBottunMeta(chartMeta)} -->`;
+			await addMessages({
+				modelId: message.model,
+				parentId: message.id,
+				messages: [{ role: 'assistant', content: `图表如下：\n\n${metaComment}` }]
+			});
 		} catch (e) {
 			toast.error(`${e}`);
 		} finally {
@@ -1076,6 +1084,14 @@
 								/>
 							{/if}
 
+							{#if model?.info?.meta?.is_bottun_rule_bot && bottunMeta?.chart}
+								<BottunChart
+									title={bottunMeta.chart.title ?? ''}
+									months={bottunMeta.chart.months ?? []}
+									values={bottunMeta.chart.values ?? []}
+								/>
+							{/if}
+
 							{#if message?.error}
 								<Error content={message?.error?.content ?? message.content} />
 							{/if}
@@ -1095,7 +1111,7 @@
 							{/if}
 
 			{#if model?.info?.meta?.is_bottun_rule_bot &&
-				bottunMeta?.sql &&
+				(bottunMeta?.kpi ?? null) &&
 				(message?.done ?? false) &&
 				((bottunMeta?.missing_params ?? []).length === 0) &&
 				!readOnly}
@@ -1106,7 +1122,7 @@
 							disabled={bottunChartLoading}
 							on:click={generateBottunChart}
 						>
-							{bottunChartLoading ? '生成中…' : '生成图片'}
+							{bottunChartLoading ? '生成中…' : '生成图表'}
 						</button>
 						<button
 							class="px-3 py-1 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 rounded-lg text-sm transition"
@@ -1134,19 +1150,19 @@
 
 				{#if !edit}
 					{@const bottunMissing = bottunMeta?.missing_params ?? []}
-					{#if model?.info?.meta?.is_bottun_rule_bot && (bottunMissing.includes('time_range') || message.content.includes('请提供时间范围')) && isLastMessage && !readOnly}
+					{#if model?.info?.meta?.is_bottun_rule_bot && (bottunMissing.includes('time_range') || message.content.includes('请提供时间范围') || message.content.includes('请选择时间范围') || message.content.includes('选择时间范围')) && isLastMessage && !readOnly}
 						<div class="flex gap-2 mt-2">
 							<button 
 								class="px-3 py-1 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 rounded-lg text-sm transition" 
-								on:click={() => submitMessage(message.id, "当前财年")}
+							on:click={() => submitMessage(message.id, currentFiscalYearOption.range)}
 							>
-								当前财年
+							{currentFiscalYearOption.label}
 							</button>
 							<button 
 								class="px-3 py-1 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 rounded-lg text-sm transition" 
-								on:click={() => submitMessage(message.id, "半期")}
+							on:click={() => submitMessage(message.id, getCurrentFiscalHalfYearOption().range)}
 							>
-								半期
+								{currentFiscalHalfYearOption.label}
 							</button>
 						</div>
 					{/if}

@@ -22,23 +22,67 @@
 	export let selectedItemId: string | null = null;
 	export let itemRatings: Record<string, ItemRating> = {};
 
+	let introText = '';
+	let pairedItems: { idx: number; cause: BkmRankedText | null; action: BkmRankedText | null }[] = [];
+
 	const dispatch = createEventDispatcher();
 
 	$: introText = typeof message?.answer_markdown === 'string' ? (message.answer_markdown.split('\n')[0] || '') : '';
 
+	$: pairedItems = (() => {
+		const causes = Array.isArray(message?.causes) ? message.causes : [];
+		const actions = Array.isArray(message?.actions) ? message.actions : [];
+		const n = Math.max(causes.length, actions.length);
+		return Array.from({ length: n }, (_, idx) => ({
+			idx,
+			cause: causes[idx] ?? null,
+			action: actions[idx] ?? null
+		}));
+	})();
+
+	function getDocsForEntryIds(entryIds: string[]): BkmDocHit[] {
+		const seen = new Set<string>();
+		const docs: BkmDocHit[] = [];
+		for (const entryId of entryIds) {
+			const hits = (message?.docs_by_item?.[entryId] as BkmDocHit[]) || [];
+			for (const h of hits) {
+				const key = `${h?.pdf ?? ''}#${h?.page ?? ''}`;
+				if (seen.has(key)) continue;
+				seen.add(key);
+				docs.push(h);
+			}
+		}
+		return docs;
+	}
+
 	function handleSelect(kind: 'cause' | 'action', entry: BkmRankedText) {
-		const docs = (message?.docs_by_item?.[entry.id] as BkmDocHit[]) || [];
+		const docs = getDocsForEntryIds([entry.id]);
 		dispatch('selectItem', { kind, entry, docs });
 	}
 
-	function handleRate(
+	function handleSelectPair(pair: { cause: BkmRankedText | null; action: BkmRankedText | null }) {
+		const primary = pair.cause ?? pair.action;
+		if (!primary) return;
+		const kind: 'cause' | 'action' = pair.cause ? 'cause' : 'action';
+		const entryIds = [pair.cause?.id, pair.action?.id].filter(Boolean) as string[];
+		const docs = getDocsForEntryIds(entryIds);
+		dispatch('selectItem', { kind, entry: primary, docs });
+	}
+
+	function dispatchItemRating(payload: { kind: 'cause' | 'action'; entry: BkmRankedText; rating: ItemRating }) {
+		const docs = (message?.docs_by_item?.[payload.entry.id] as BkmDocHit[]) || [];
+		dispatch('rateItem', { ...payload, docs });
+	}
+
+	function handlePairRate(
 		e: MouseEvent,
-		payload: { kind: 'cause' | 'action'; entry: BkmRankedText; rating: ItemRating }
+		pair: { cause: BkmRankedText | null; action: BkmRankedText | null },
+		rating: ItemRating
 	) {
 		e.preventDefault();
 		e.stopPropagation();
-		const docs = (message?.docs_by_item?.[payload.entry.id] as BkmDocHit[]) || [];
-		dispatch('rateItem', { ...payload, docs });
+		if (pair.cause) dispatchItemRating({ kind: 'cause', entry: pair.cause, rating });
+		if (pair.action) dispatchItemRating({ kind: 'action', entry: pair.action, rating });
 	}
 </script>
 
@@ -56,89 +100,60 @@
 				<div class="mt-2 text-sm text-red-600">{message.error}</div>
 			{/if}
 
-			{#if (message.causes && message.causes.length > 0) || (message.actions && message.actions.length > 0)}
-				<div class="mt-3 space-y-4">
-					{#if message.causes && message.causes.length > 0}
-						<div>
-							<div class="text-sm font-semibold text-gray-900">原因:</div>
-							<div class="mt-2 space-y-2">
-								{#each message.causes as entry}
-									<div
-										role="button"
-										tabindex="0"
-										class="w-full text-left rounded-md border px-3 py-2 transition cursor-pointer {selectedItemId === entry.id ? 'border-blue-300 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}"
-										on:click={() => handleSelect('cause', entry)}
-										on:keydown={(e) => {
-											if (e.key === 'Enter') handleSelect('cause', entry);
-										}}
-									>
-										<div class="flex items-center justify-between gap-3">
-											<div class="min-w-0">
-												<div class="text-sm text-gray-900 break-words">{entry.text}</div>
-											</div>
-											<div class="shrink-0 flex items-center gap-2">
-												<button
-													type="button"
-													class="px-2 py-1 rounded text-xs border {itemRatings[entry.id] === 'up' ? 'bg-green-50 border-green-200 text-green-700' : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'}"
-													on:click={(e) => handleRate(e, { kind: 'cause', entry, rating: 'up' })}
-												>
-													赞
-												</button>
-												<button
-													type="button"
-													class="px-2 py-1 rounded text-xs border {itemRatings[entry.id] === 'down' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'}"
-													on:click={(e) => handleRate(e, { kind: 'cause', entry, rating: 'down' })}
-												>
-													踩
-												</button>
-											</div>
+			{#if pairedItems && pairedItems.length > 0}
+				<div class="mt-3">
+					<div class="text-sm font-semibold text-gray-900">原因 / 行动建议:</div>
+					<div class="mt-2 space-y-2">
+						{#each pairedItems as pair}
+							{@const pairRating =
+								(pair.cause && pair.action && itemRatings[pair.cause.id] === itemRatings[pair.action.id]
+									? itemRatings[pair.cause.id]
+									: pair.cause
+										? itemRatings[pair.cause.id]
+										: pair.action
+											? itemRatings[pair.action.id]
+											: null) ?? null}
+						<div class="flex items-center gap-2">
+								<div
+									role="button"
+									tabindex="0"
+									class="flex-1 text-left rounded-md border px-3 py-2 transition cursor-pointer {selectedItemId === (pair.cause?.id ?? pair.action?.id) ? 'border-blue-300 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}"
+									on:click={() => handleSelectPair(pair)}
+									on:keydown={(e) => {
+										if (e.key === 'Enter') handleSelectPair(pair);
+									}}
+								>
+									<div class="space-y-1">
+										<div class="text-sm text-gray-900 break-words">
+											<span class="font-semibold">原因：</span>{pair.cause?.text ?? '—'}
+										</div>
+										<div class="text-sm text-gray-900 break-words">
+											<span class="font-semibold">行动建议：</span>{pair.action?.text ?? '—'}
 										</div>
 									</div>
-								{/each}
-							</div>
-						</div>
-					{/if}
+								</div>
 
-					{#if message.actions && message.actions.length > 0}
-						<div>
-							<div class="text-sm font-semibold text-gray-900">行动建议:</div>
-							<div class="mt-2 space-y-2">
-								{#each message.actions as entry}
-									<div
-										role="button"
-										tabindex="0"
-										class="w-full text-left rounded-md border px-3 py-2 transition cursor-pointer {selectedItemId === entry.id ? 'border-blue-300 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}"
-										on:click={() => handleSelect('action', entry)}
-										on:keydown={(e) => {
-											if (e.key === 'Enter') handleSelect('action', entry);
-										}}
+								<div class="shrink-0 flex items-center gap-2">
+									<button
+										type="button"
+										aria-label="点赞"
+										class="px-2 py-1 rounded text-xs border {pairRating === 'up' ? 'bg-green-50 border-green-200 text-green-700' : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'}"
+										on:click={(e) => handlePairRate(e, pair, 'up')}
 									>
-										<div class="flex items-center justify-between gap-3">
-											<div class="min-w-0">
-												<div class="text-sm text-gray-900 break-words">{entry.text}</div>
-											</div>
-											<div class="shrink-0 flex items-center gap-2">
-												<button
-													type="button"
-													class="px-2 py-1 rounded text-xs border {itemRatings[entry.id] === 'up' ? 'bg-green-50 border-green-200 text-green-700' : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'}"
-													on:click={(e) => handleRate(e, { kind: 'action', entry, rating: 'up' })}
-												>
-													赞
-												</button>
-												<button
-													type="button"
-													class="px-2 py-1 rounded text-xs border {itemRatings[entry.id] === 'down' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'}"
-													on:click={(e) => handleRate(e, { kind: 'action', entry, rating: 'down' })}
-												>
-													踩
-												</button>
-											</div>
-										</div>
-									</div>
-								{/each}
+										👍
+									</button>
+									<button
+										type="button"
+										aria-label="点踩"
+										class="px-2 py-1 rounded text-xs border {pairRating === 'down' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'}"
+										on:click={(e) => handlePairRate(e, pair, 'down')}
+									>
+										👎
+									</button>
+								</div>
 							</div>
-						</div>
-					{/if}
+						{/each}
+					</div>
 				</div>
 			{/if}
 		{/if}

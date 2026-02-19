@@ -216,11 +216,15 @@
 				</div>
 			</div>
 
-			<div class="h-full {activeTab !== 'source' ? 'hidden lg:flex' : ''} flex flex-col">
-				<div class="bg-white border rounded-lg overflow-hidden flex flex-col h-full">
-					<div class="px-3 py-2 border-b flex items-center justify-between">
-						<div class="text-sm font-semibold text-gray-900">搜索文档</div>
-						<div class="flex items-center gap-2">
+			{#if selectedItemId}
+				<div class="h-full {activeTab !== 'source' ? 'hidden lg:flex' : ''} flex flex-col">
+					<div class="bg-white border rounded-lg overflow-hidden flex flex-col h-full">
+						<div class="px-3 py-2 border-b flex items-center justify-between">
+							<div class="flex items-center gap-2">
+								<div class="text-sm font-semibold text-gray-900">搜索网页</div>
+								<div class="text-xs text-gray-500">{selectedDocs?.length ?? 0}</div>
+							</div>
+							<div class="flex items-center gap-2">
 							{#if selectedDoc?.pdf}
 								<button
 									class="text-xs px-2 py-1 border rounded hover:bg-gray-50"
@@ -232,30 +236,28 @@
 						</div>
 					</div>
 
-					<div class="border-b bg-white p-3">
+					<div class="border-b bg-white">
 						{#if selectedItemId && selectedDocs && selectedDocs.length > 0}
-							<div class="text-xs text-gray-500">命中 {selectedDocs.length} 条</div>
-							<div class="mt-2 space-y-2">
+							<div class="divide-y divide-gray-100">
 								{#each selectedDocs as d}
 									<button
 										type="button"
-										class="w-full text-left rounded-md border px-3 py-2 hover:bg-gray-50 {selectedDoc && selectedDoc.pdf === d.pdf && selectedDoc.page === d.page ? 'border-blue-300 bg-blue-50' : 'border-gray-200'}"
+										class="w-full text-left px-3 py-2 hover:bg-gray-50 {selectedDoc && selectedDoc.pdf === d.pdf && selectedDoc.page === d.page ? 'bg-blue-50' : ''}"
 										on:click={() => handleOpenDoc(d)}
 									>
-										<div class="flex items-start justify-between gap-3">
-											<div class="min-w-0">
-												<div class="text-sm text-gray-900 break-words">{d.title}</div>
-												{#if d.snippet}
-													<div class="mt-1 text-xs text-gray-600 line-clamp-3 break-words">{d.snippet}</div>
-												{/if}
-											</div>
+										<div class="flex items-center justify-between gap-3">
+											<div class="text-xs text-gray-500 truncate">{d.pdf}{d.page ? ` · 第 ${d.page} 页` : ''}</div>
 											<div class="shrink-0 text-xs text-gray-500">{Math.round((d.score || 0) * 100)}%</div>
 										</div>
+										<div class="mt-1 text-sm font-semibold text-gray-900 break-words">{d.title || d.pdf}</div>
+										{#if d.snippet}
+											<div class="mt-1 text-xs text-gray-600 line-clamp-3 break-words">{d.snippet}</div>
+										{/if}
 									</button>
 								{/each}
 							</div>
 						{:else}
-							<div class="text-sm text-gray-500">点击左侧某条原因/行动建议后，这里会显示对应的 PDF 页码链接。</div>
+							<div class="p-3 text-sm text-gray-500">点击左侧某组原因/行动建议后，这里会显示对应的 PDF 页码链接。</div>
 						{/if}
 					</div>
 
@@ -268,8 +270,9 @@
 							</div>
 						{/if}
 					</div>
+					</div>
 				</div>
-			</div>
+			{/if}
 		</div>
 	</div>
 </div>

@@ -36,6 +36,7 @@
 	import { page } from '$app/stores';
 	import { beforeNavigate } from '$app/navigation';
 	import { updated } from '$app/state';
+	import { dev } from '$app/environment';
 
 	import i18n, { initI18n, getLanguages, changeLanguage } from '$lib/i18n';
 
@@ -85,6 +86,8 @@
 	setContext('i18n', i18n);
 
 	const bc = new BroadcastChannel('active-tab-channel');
+	let bcClosed = false;
+	let handleVisibilityChange = null;
 
 	let loaded = false;
 	let tokenTimer = null;
@@ -620,6 +623,9 @@
 	};
 
 	onMount(async () => {
+		if (dev) {
+			await unregisterServiceWorkers();
+		}
 		window.addEventListener('message', windowMessageEventHandler);
 
 		let touchstartY = 0;
@@ -685,10 +691,18 @@
 		};
 
 		// Set yourself as the last active tab when this tab is focused
-		const handleVisibilityChange = () => {
+		handleVisibilityChange = () => {
 			if (document.visibilityState === 'visible') {
 				isLastActiveTab.set(true); // This tab is now the active tab
-				bc.postMessage('active'); // Notify other tabs that this tab is active
+				if (!bcClosed) {
+					try {
+						bc.postMessage('active'); // Notify other tabs that this tab is active
+					} catch (e) {
+						if (!(e instanceof DOMException && e.name === 'InvalidStateError')) {
+							throw e;
+						}
+					}
+				}
 
 				// Check token expiry when the tab becomes active
 				checkTokenExpiry();
@@ -842,11 +856,18 @@
 
 		return () => {
 			window.removeEventListener('resize', onResize);
+			if (handleVisibilityChange) {
+				document.removeEventListener('visibilitychange', handleVisibilityChange);
+			}
 		};
 	});
 
 	onDestroy(() => {
 		window.removeEventListener('message', windowMessageEventHandler);
+		if (handleVisibilityChange) {
+			document.removeEventListener('visibilitychange', handleVisibilityChange);
+		}
+		bcClosed = true;
 		bc.close();
 	});
 </script>

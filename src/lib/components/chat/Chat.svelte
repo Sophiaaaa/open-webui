@@ -97,6 +97,7 @@
 	import Tooltip from '../common/Tooltip.svelte';
 	import Sidebar from '../icons/Sidebar.svelte';
 	import Image from '../common/Image.svelte';
+	import BkmDocDrawer from './BkmDocDrawer.svelte';
 
 	export let chatIdProp = '';
 
@@ -2638,6 +2639,7 @@
 					{eventTarget}
 				/>
 			</PaneGroup>
+			<BkmDocDrawer />
 		</div>
 	{:else if loading}
 		<div class=" flex items-center justify-center h-full w-full">

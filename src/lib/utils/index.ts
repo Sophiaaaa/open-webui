@@ -86,6 +86,10 @@ export const sanitizeResponseContent = (content: string) => {
 
 export const processResponseContent = (content: string) => {
 	content = processChineseContent(content);
+	content = (content ?? '').replace(
+		/(?:\s*(?:<!--|&lt;!--)\s*(?:BOTTUN_META|BKM_META):\s*[A-Za-z0-9_\-]+=*\s*(?:-->|--&gt;)\s*)+$/g,
+		''
+	);
 	return content.trim();
 };
 

@@ -213,6 +213,13 @@ def list_models():
             "meta": {
                 "is_bkm_bot": True,
                 "capabilities": {"feedback": True},
+                "suggestion_prompts": [
+                    {
+                        "title": ["工艺温度不稳", ""],
+                        "content": "工艺温度不稳",
+                        "auto_submit": True,
+                    }
+                ],
             }
         },
     }

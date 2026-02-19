@@ -90,6 +90,23 @@ export const showOverview = writable(false);
 export const showArtifacts = writable(false);
 export const showCallOverlay = writable(false);
 
+export type BkmDocSidebarItem = {
+	href: string;
+	pdf?: string;
+	page?: number | null;
+	title?: string;
+	score?: number;
+	snippet?: string;
+};
+
+export const bkmDocSidebar = writable<{
+	open: boolean;
+	items: BkmDocSidebarItem[];
+}>({
+	open: false,
+	items: []
+});
+
 export const artifactCode = writable(null);
 export const artifactContents = writable(null);
 

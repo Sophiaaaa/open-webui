@@ -57,7 +57,19 @@ export default defineConfig({
 				target: 'http://localhost:8081',
 				changeOrigin: true
 			},
-			'/bkm': {
+			'/bkm/v1': {
+				target: 'http://localhost:8081',
+				changeOrigin: true
+			},
+			'/bkm/chat': {
+				target: 'http://localhost:8081',
+				changeOrigin: true
+			},
+			'/bkm/config': {
+				target: 'http://localhost:8081',
+				changeOrigin: true
+			},
+			'/bkm/assets': {
 				target: 'http://localhost:8081',
 				changeOrigin: true
 			},

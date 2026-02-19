@@ -17,6 +17,7 @@
 
 	import {
 		audioQueue,
+		bkmDocSidebar,
 		config,
 		models,
 		settings,
@@ -94,6 +95,57 @@
 		}
 	}
 
+	type BkmRankedText = {
+		id: string;
+		text: string;
+		score: number;
+	};
+
+	type BkmDocHit = {
+		pdf: string;
+		page: number | null;
+		title: string;
+		score: number;
+		snippet: string;
+	};
+
+	type BkmMeta = {
+		top_k?: number;
+		causes?: BkmRankedText[];
+		actions?: BkmRankedText[];
+		docs_by_item?: Record<string, BkmDocHit[]>;
+		assets_base_url?: string;
+	};
+
+	type BkmPair = {
+		idx: number;
+		cause: BkmRankedText | null;
+		action: BkmRankedText | null;
+	};
+
+	function decodeBkmMetaBase64(b64url: string): BkmMeta | null {
+		try {
+			const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
+			const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+			const jsonStr = decodeURIComponent(
+				Array.from(atob(padded))
+					.map((c) => `%${c.charCodeAt(0).toString(16).padStart(2, '0')}`)
+					.join('')
+			);
+			return JSON.parse(jsonStr);
+		} catch {
+			return null;
+		}
+	}
+
+	function extractBkmMeta(content: string): BkmMeta | null {
+		const match = (content ?? '').match(
+			/(?:<!--|&lt;!--)\s*BKM_META:\s*([A-Za-z0-9_\-]+=*)\s*(?:-->|--&gt;)/
+		);
+		if (!match) return null;
+		return decodeBkmMetaBase64(match[1]);
+	}
+
 	function extractBottunMeta(content: string): BottunMeta | null {
 		const match = content.match(/<!--\s*BOTTUN_META:\s*([A-Za-z0-9_\-]+=*)\s*-->/);
 		if (!match) return null;
@@ -102,9 +154,26 @@
 
 	function stripBottunMeta(content: string): string {
 		return (content ?? '')
-			.replace(/<!--\s*BOTTUN_META:\s*[A-Za-z0-9_\-]+=*\s*-->\s*/g, '')
-			.replace(/&lt;!--\s*BOTTUN_META:\s*[A-Za-z0-9_\-]+=*\s*--&gt;\s*/g, '')
+			.replace(
+				/(?:\s*(?:<!--|&lt;!--)\s*(?:BOTTUN_META|BKM_META):\s*[A-Za-z0-9_\-]+=*\s*(?:-->|--&gt;)\s*)+$/g,
+				''
+			)
 			.trimEnd();
+	}
+
+	function stripBkmReasonActionSections(content: string): string {
+		const raw = content ?? '';
+		const idxReason = raw.search(/\n\s*原因\s*[：:]/);
+		const idxAction = raw.search(/\n\s*行动建议\s*[：:]/);
+		const cutAt =
+			idxReason >= 0 && idxAction >= 0
+				? Math.min(idxReason, idxAction)
+				: idxReason >= 0
+					? idxReason
+					: idxAction;
+
+		if (cutAt < 0) return raw;
+		return raw.slice(0, cutAt).trimEnd();
 	}
 
 	interface MessageType {
@@ -207,8 +276,178 @@
 	let bottunMeta: BottunMeta | null = null;
 	$: bottunMeta = (message?.content ?? '').includes('BOTTUN_META') ? extractBottunMeta(message.content) : null;
 
+	let bkmMeta: BkmMeta | null = null;
+	$: bkmMeta = (message?.content ?? '').includes('BKM_META') ? extractBkmMeta(message.content) : null;
+
+	let selectedBkmPairIdx: number | null = null;
+	$: if (!bkmMeta || (!bkmMeta?.causes?.length && !bkmMeta?.actions?.length)) selectedBkmPairIdx = null;
+
+	let bkmPairs: BkmPair[] = [];
+	$: bkmPairs = (() => {
+		const causes = Array.isArray(bkmMeta?.causes) ? (bkmMeta?.causes as BkmRankedText[]) : [];
+		const actions = Array.isArray(bkmMeta?.actions) ? (bkmMeta?.actions as BkmRankedText[]) : [];
+		const n = Math.max(causes.length, actions.length);
+		return Array.from({ length: n }, (_, idx) => ({
+			idx,
+			cause: causes[idx] ?? null,
+			action: actions[idx] ?? null
+		}));
+	})();
+
+	function getBkmDocsForEntryIds(entryIds: string[]): BkmDocHit[] {
+		const docsByItem = bkmMeta?.docs_by_item || {};
+		const seen = new Set<string>();
+		const docs: BkmDocHit[] = [];
+		for (const entryId of entryIds) {
+			const hits = (docsByItem as any)?.[entryId] as BkmDocHit[];
+			if (!Array.isArray(hits)) continue;
+			for (const h of hits) {
+				const key = `${h?.pdf ?? ''}#${h?.page ?? ''}`;
+				if (seen.has(key)) continue;
+				seen.add(key);
+				docs.push(h);
+			}
+		}
+		return docs;
+	}
+
+	let selectedBkmPair: BkmPair | undefined;
+	$: selectedBkmPair =
+		selectedBkmPairIdx === null
+			? undefined
+			: (Array.isArray(bkmPairs) ? bkmPairs : []).find((p) => p.idx === selectedBkmPairIdx);
+
+	let selectedBkmDocs: BkmDocHit[] = [];
+	$: selectedBkmDocs = selectedBkmPair
+		? getBkmDocsForEntryIds([
+				selectedBkmPair.cause?.id,
+				selectedBkmPair.action?.id
+			].filter(Boolean) as string[])
+		: [];
+
+	$: if (model?.info?.meta?.is_bkm_bot && bkmMeta && bkmPairs && bkmPairs.length > 0) {
+		if (selectedBkmPairIdx === null) {
+			syncBkmDocSidebar([], false);
+		} else {
+			syncBkmDocSidebar(selectedBkmDocs, true);
+		}
+	}
+
+	let bkmAssetsBaseUrl = '';
+	$: bkmAssetsBaseUrl = (bkmMeta?.assets_base_url || '/bkm/assets').replace(/\/$/, '');
+
+	function buildBkmPdfUrl(doc: BkmDocHit) {
+		if (!doc?.pdf) return '';
+		const base = `${bkmAssetsBaseUrl}/${encodeURIComponent(doc.pdf)}`;
+		return doc.page ? `${base}#page=${doc.page}` : base;
+	}
+
+	function syncBkmDocSidebar(docs: BkmDocHit[], open: boolean) {
+		bkmDocSidebar.set({
+			open,
+			items: (docs ?? []).map((d) => ({
+				href: buildBkmPdfUrl(d),
+				pdf: d.pdf,
+				page: d.page,
+				title: d.title,
+				score: d.score,
+				snippet: d.snippet
+			}))
+		});
+	}
+
+	type BkmItemRating = 'up' | 'down' | null;
+	let bkmItemRatings: Record<string, BkmItemRating> = {};
+	let bkmItemFeedbackIds: Record<string, string> = {};
+	$: bkmItemRatings = (message?.annotation?.bkm_item_ratings as Record<string, BkmItemRating>) ?? {};
+	$: bkmItemFeedbackIds = (message?.annotation?.bkm_item_feedback_ids as Record<string, string>) ?? {};
+
+	async function submitBkmItemRating(payload: {
+		kind: 'cause' | 'action';
+		entry: BkmRankedText;
+		rating: Exclude<BkmItemRating, null>;
+	}) {
+		const token = localStorage.token;
+		if (!token) return;
+
+		const entryId = payload.entry.id;
+		const docs = getBkmDocsForEntryIds([entryId]);
+
+		const feedbackItem = {
+			type: 'bkm_item_rating',
+			data: {
+				rating: payload.rating,
+				kind: payload.kind,
+				entry_id: entryId,
+				text: payload.entry.text,
+				score: payload.entry.score
+			},
+			meta: {
+				page: 'chat',
+				chat_id: chatId,
+				message_id: message.id,
+				docs
+			}
+		};
+
+		let feedback = null;
+		const existingFeedbackId = bkmItemFeedbackIds?.[entryId] ?? null;
+		if (existingFeedbackId) {
+			feedback = await updateFeedbackById(token, existingFeedbackId, feedbackItem).catch((error) => {
+				toast.error(`${error}`);
+				return null;
+			});
+		} else {
+			feedback = await createNewFeedback(token, feedbackItem).catch((error) => {
+				toast.error(`${error}`);
+				return null;
+			});
+		}
+
+		const updatedMessage = {
+			...message,
+			annotation: {
+				...(message?.annotation ?? {}),
+				bkm_item_ratings: {
+					...(bkmItemRatings ?? {}),
+					[entryId]: payload.rating
+				},
+				bkm_item_feedback_ids: {
+					...(bkmItemFeedbackIds ?? {}),
+					...(feedback && !existingFeedbackId ? { [entryId]: feedback.id } : {})
+				}
+			}
+		};
+
+		saveMessage(message.id, updatedMessage);
+	}
+
+	async function handleBkmItemRate(
+		e: MouseEvent,
+		payload: { kind: 'cause' | 'action'; entry: BkmRankedText; rating: Exclude<BkmItemRating, null> }
+	) {
+		e.preventDefault();
+		e.stopPropagation();
+		await submitBkmItemRating(payload);
+	}
+
+	async function handleBkmPairRate(e: MouseEvent, pair: BkmPair, rating: Exclude<BkmItemRating, null>) {
+		e.preventDefault();
+		e.stopPropagation();
+		const tasks: Promise<void>[] = [];
+		if (pair.cause) tasks.push(submitBkmItemRating({ kind: 'cause', entry: pair.cause, rating }));
+		if (pair.action) tasks.push(submitBkmItemRating({ kind: 'action', entry: pair.action, rating }));
+		await Promise.all(tasks);
+	}
+
 	let displayContent = '';
-	$: displayContent = stripBottunMeta(message?.content ?? '');
+	$: displayContent = (() => {
+		const base = stripBottunMeta(message?.content ?? '');
+		if (model?.info?.meta?.is_bkm_bot && bkmMeta) {
+			return stripBkmReasonActionSections(base);
+		}
+		return base;
+	})();
 
 	let bottunChartLoading = false;
 	let bottunHasData = false;
@@ -485,7 +724,10 @@
 		}
 
 		speaking = true;
-		const content = stripBottunMeta(removeAllDetails(message.content));
+		let content = stripBottunMeta(removeAllDetails(message.content));
+		if (model?.info?.meta?.is_bkm_bot && bkmMeta) {
+			content = stripBkmReasonActionSections(content);
+		}
 
 		// Get voice: model-specific > user settings > config default
 		const getVoiceId = () => {
@@ -993,7 +1235,7 @@
 											document.getElementById('confirm-edit-message-button')?.click();
 										}
 									}}
-								/>
+								></textarea>
 
 								<div class=" mt-2 mb-1 flex justify-between text-sm font-medium">
 									<div>
@@ -1082,6 +1324,61 @@
 										updateChat();
 									}}
 								/>
+							{/if}
+
+							{#if model?.info?.meta?.is_bkm_bot && bkmMeta && bkmPairs && bkmPairs.length > 0}
+								<div class="mt-2 space-y-2">
+											{#each bkmPairs as pair}
+												{@const pairRating =
+													(pair.cause && pair.action && bkmItemRatings[pair.cause.id] === bkmItemRatings[pair.action.id]
+														? bkmItemRatings[pair.cause.id]
+														: pair.cause
+															? bkmItemRatings[pair.cause.id]
+															: pair.action
+																? bkmItemRatings[pair.action.id]
+																: null) ?? null}
+											<div class="flex items-center gap-2">
+													<div
+														role="button"
+														tabindex="0"
+														class="flex-1 text-left rounded-md border px-3 py-2 transition cursor-pointer {selectedBkmPairIdx === pair.idx ? 'border-blue-300 bg-blue-50 dark:bg-blue-950/30' : 'border-gray-200 hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900/60'}"
+														on:click={() => (selectedBkmPairIdx = pair.idx)}
+														on:keydown={(e) => {
+															if (e.key === 'Enter') selectedBkmPairIdx = pair.idx;
+														}}
+													>
+														<div class="text-sm text-gray-900 dark:text-gray-100 break-words">
+															<span class="font-semibold">原因：</span>{pair.cause?.text ?? '—'}
+														</div>
+														<div class="mt-1 text-sm text-gray-900 dark:text-gray-100 break-words">
+															<span class="font-semibold">行动建议：</span>{pair.action?.text ?? '—'}
+														</div>
+													</div>
+
+													{#if !readOnly}
+														<div class="shrink-0 flex items-center gap-2">
+															<button
+																type="button"
+																aria-label="点赞"
+																class="px-2 py-1 rounded text-xs border {pairRating === 'up' ? 'bg-green-50 border-green-200 text-green-700' : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'}"
+																on:click={(e) => handleBkmPairRate(e, pair, 'up')}
+															>
+																👍
+															</button>
+															<button
+																type="button"
+																aria-label="点踩"
+																class="px-2 py-1 rounded text-xs border {pairRating === 'down' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'}"
+																on:click={(e) => handleBkmPairRate(e, pair, 'down')}
+															>
+																👎
+															</button>
+														</div>
+													{/if}
+												</div>
+										{/each}
+									<div class="text-xs text-gray-500 dark:text-gray-400">点击某组原因/行动建议后，右侧展示 PDF 链接。</div>
+								</div>
 							{/if}
 
 							{#if model?.info?.meta?.is_bottun_rule_bot && bottunMeta?.chart}
@@ -1677,8 +1974,9 @@
 
 									{#if ($user?.role === 'admin' || ($user?.permissions?.chat?.regenerate_response ?? true)) && !model?.info?.meta?.is_bottun_rule_bot}
 										{#if $settings?.regenerateMenu ?? true}
-											<button
+															<button
 												type="button"
+																aria-label="regenerate-response"
 												class="hidden regenerate-response-button"
 												on:click={() => {
 													showRateComment = false;
@@ -1695,8 +1993,8 @@
 															}
 														});
 													});
-												}}
-											/>
+																}}
+															></button>
 
 											<RegenerateMenu
 												onRegenerate={(prompt = null) => {

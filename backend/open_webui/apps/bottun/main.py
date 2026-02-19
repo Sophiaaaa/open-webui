@@ -535,7 +535,17 @@ def list_models():
                 "is_bottun_rule_bot": True,
                 "capabilities": {
                     "feedback": False
-                }
+                },
+                "suggestion_prompts": [
+                    {
+                        "title": [
+                            "SU Hour per Tool 平均装机小时数",
+                            "SU Hour per Tool 平均装机小时数是多少",
+                        ],
+                        "content": "SU Hour per Tool 平均装机小时数是多少",
+                        "auto_submit": True,
+                    }
+                ],
             }
         }
     }

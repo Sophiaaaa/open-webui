@@ -149,6 +149,10 @@
 	$: if (!chatId) {
 		closeHandler();
 	}
+
+	$: if ($showControls && pane && pane.getSize() < minSize) {
+		pane.resize(minSize);
+	}
 </script>
 
 {#if !largeScreen}

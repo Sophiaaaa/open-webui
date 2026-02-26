@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { askBkm, type BkmAskResponse, type BkmDocHit } from '$lib/apis/bkm';
+	import { getBotsAccess } from '$lib/apis/bots';
 	import { createNewFeedback } from '$lib/apis/evaluations';
 	import BkmChatBubble from '$lib/components/bkm/BkmChatBubble.svelte';
 	import { toast } from 'svelte-sonner';
@@ -48,6 +50,22 @@
 
 	onMount(async () => {
 		token = localStorage.getItem('token') || '';
+		if (!token) {
+			await goto('/');
+			return;
+		}
+		try {
+			const access = await getBotsAccess(token);
+			if (!access?.bkm_bot) {
+				toast.error('无权限访问 BKM Bot');
+				await goto('/');
+				return;
+			}
+		} catch {
+			toast.error('无权限访问 BKM Bot');
+			await goto('/');
+			return;
+		}
 		resetChat();
 	});
 

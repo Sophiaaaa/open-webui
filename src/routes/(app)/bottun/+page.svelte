@@ -1,7 +1,10 @@
 <script lang="ts">
     import { onMount, tick } from 'svelte';
+	import { goto } from '$app/navigation';
     import { getUIConfig, analyzeQuery, generateAndExecuteSQL, getDownloadUrl } from '$lib/apis/bottun';
+	import { getBotsAccess } from '$lib/apis/bots';
     import ChatBubble from '$lib/components/bottun/ChatBubble.svelte';
+	import { toast } from 'svelte-sonner';
     
     let token = '';
     let uiConfig: any = {};
@@ -15,7 +18,23 @@
     
     onMount(async () => {
         token = localStorage.getItem('token') || '';
-        if (token) {
+		if (!token) {
+			await goto('/');
+			return;
+		}
+		try {
+			const access = await getBotsAccess(token);
+			if (!access?.kpi_bot) {
+				toast.error('无权限访问 KPI Bot');
+				await goto('/');
+				return;
+			}
+		} catch {
+			toast.error('无权限访问 KPI Bot');
+			await goto('/');
+			return;
+		}
+		if (token) {
             uiConfig = await getUIConfig(token);
             // Initial greeting
             messages = [{

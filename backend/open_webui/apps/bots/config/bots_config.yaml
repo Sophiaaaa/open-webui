@@ -1,6 +1,13 @@
 bots:
   kpi_bot:
+    bot_id: "bottun-rule-bot"
     enabled: true
+    access:
+      group_names:
+        - "KPI"
   bkm_bot:
+    bot_id: "bkm-bot"
     enabled: true
-
+    access:
+      group_names:
+        - "Display"

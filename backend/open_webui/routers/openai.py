@@ -24,6 +24,8 @@ from sqlalchemy.orm import Session
 from open_webui.internal.db import get_session
 
 from open_webui.models.models import Models
+from open_webui.models.groups import Groups
+from open_webui.apps.bots.runtime_config import is_user_allowed_for_bot, load_bots_runtime_config
 from open_webui.config import (
     CACHE_DIR,
 )
@@ -533,6 +535,30 @@ async def get_all_models(request: Request, user: UserModel) -> dict[str, list]:
         return models
 
     models = get_merged_models(map(extract_data, responses))
+
+    if user and user.role != "admin":
+        cfg = load_bots_runtime_config()
+        user_groups = Groups.get_groups_by_member_id(user.id)
+        user_group_names = [g.name for g in (user_groups or [])]
+
+        allow_bkm = is_user_allowed_for_bot(user, cfg.bkm_access, user_group_names)
+        allow_kpi = is_user_allowed_for_bot(user, cfg.kpi_access, user_group_names)
+
+        bkm_bot_id = cfg.bkm_bot_id
+        kpi_bot_id = cfg.kpi_bot_id
+
+        def _is_allowed_bot_model(model_id: str) -> bool:
+            mid = str(model_id or "").strip()
+            if not mid:
+                return False
+            if bkm_bot_id and (mid == bkm_bot_id or mid.endswith(f".{bkm_bot_id}")):
+                return allow_bkm
+            if kpi_bot_id and (mid == kpi_bot_id or mid.endswith(f".{kpi_bot_id}")):
+                return allow_kpi
+            return True
+
+        models = {k: v for k, v in models.items() if _is_allowed_bot_model(k)}
+
     log.debug(f"models: {models}")
 
     request.app.state.OPENAI_MODELS = models
@@ -851,10 +877,22 @@ async def generate_chat_completion(
                 )
     elif not bypass_filter:
         if user.role != "admin":
-            raise HTTPException(
-                status_code=403,
-                detail="Model not found",
-            )
+            cfg = load_bots_runtime_config()
+            user_groups = Groups.get_groups_by_member_id(user.id, db=db)
+            user_group_names = [g.name for g in (user_groups or [])]
+
+            allow_bkm = is_user_allowed_for_bot(user, cfg.bkm_access, user_group_names)
+            allow_kpi = is_user_allowed_for_bot(user, cfg.kpi_access, user_group_names)
+
+            bkm_bot_id = cfg.bkm_bot_id
+            kpi_bot_id = cfg.kpi_bot_id
+
+            mid = str(model_id or "").strip()
+            is_bkm = bool(bkm_bot_id) and (mid == bkm_bot_id or mid.endswith(f".{bkm_bot_id}"))
+            is_kpi = bool(kpi_bot_id) and (mid == kpi_bot_id or mid.endswith(f".{kpi_bot_id}"))
+
+            if (is_bkm and not allow_bkm) or (is_kpi and not allow_kpi) or (not is_bkm and not is_kpi):
+                raise HTTPException(status_code=403, detail="Model not found")
 
     await get_all_models(request, user=user)
     model = request.app.state.OPENAI_MODELS.get(model_id)

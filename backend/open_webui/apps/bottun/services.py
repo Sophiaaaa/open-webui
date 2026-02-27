@@ -448,26 +448,67 @@ class ChartService:
 # --- AI Service (OpenAI Compatible / Accelerated) ---
 class AIService:
     def __init__(self, model: str = "qwen2.5-coder:1.5b", base_url: str = "http://localhost:11434/v1"):
-        self.model = model
-        self.base_url = base_url
+        self.model = os.getenv("BOTTUN_LLM_MODEL") or model
+        self.base_url = os.getenv("BOTTUN_LLM_BASE_URL") or base_url
 
     def generate_response(self, prompt: str) -> str:
         try:
             print(f"Calling Accelerated AI Service with model {self.model}...")
-            response = requests.post(
-                f"{self.base_url}/chat/completions",
-                json={
+            base = (self.base_url or "").rstrip("/")
+            if base.endswith("/v1"):
+                base_root = base[:-3].rstrip("/")
+                openai_url = f"{base}/chat/completions"
+            else:
+                base_root = base
+                openai_url = f"{base_root}/v1/chat/completions"
+
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": "你是一个精确的数据分析助手。请始终使用中文进行回复。只在要求返回 JSON 时返回原始 JSON 数据。"},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0,
+            }
+
+            response = requests.post(openai_url, json=payload, timeout=30)
+            if response.status_code == 404:
+                ollama_url = f"{base_root}/api/chat"
+                ollama_payload = {
                     "model": self.model,
-                    "messages": [
-                        {"role": "system", "content": "你是一个精确的数据分析助手。请始终使用中文进行回复。只在要求返回 JSON 时返回原始 JSON 数据。"},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": 0
-                },
-                timeout=30
-            )
+                    "messages": payload["messages"],
+                    "stream": False,
+                    "options": {"temperature": 0},
+                }
+                response = requests.post(ollama_url, json=ollama_payload, timeout=30)
+                if not response.ok:
+                    tags = requests.get(f"{base_root}/api/tags", timeout=10).json()
+                    models = tags.get("models") if isinstance(tags, dict) else None
+                    if isinstance(models, list) and models:
+                        fallback_model = None
+                        for m in models:
+                            name = m.get("name") or m.get("model")
+                            if not name:
+                                continue
+                            n = str(name).lower()
+                            if "embed" in n or "embedding" in n:
+                                continue
+                            fallback_model = name
+                            break
+                        if not fallback_model:
+                            fallback_model = models[0].get("name") or models[0].get("model")
+                        if fallback_model:
+                            self.model = str(fallback_model)
+                            ollama_payload["model"] = self.model
+                            response = requests.post(ollama_url, json=ollama_payload, timeout=30)
+
             response.raise_for_status()
-            result = response.json()['choices'][0]['message']['content'].strip()
+            data = response.json()
+            if isinstance(data, dict) and "choices" in data:
+                result = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            else:
+                result = (data.get("message") or {}).get("content", "") if isinstance(data, dict) else ""
+            result = (result or "").strip()
             print("AI Service responded successfully.")
             return result
         except Exception as e:
@@ -487,6 +528,10 @@ class AIService:
 
         # 1. Pre-check for direct KPI matches (Exact or Keyword based)
         kpi_definitions = kpi_config.get('kpi_definitions', {})
+        known_products = ["CT", "3DI", "SPS", "ES", "SSP", "TPS", "TS", "FSI", "Certas", "SD", "Epion", "FPD"]
+        enable_llm_intent = os.getenv("BOTTUN_ENABLE_LLM_INTENT", "true").lower() == "true"
+        llm_strategy = (os.getenv("BOTTUN_LLM_INTENT_STRATEGY", "llm_first") or "").strip().lower()
+        enable_llm_full_intent = os.getenv("BOTTUN_LLM_FULL_INTENT", "false").lower() == "true"
         
         # Priority mapping for common queries (ordered by specificity)
         priority_keywords = [
@@ -509,6 +554,8 @@ class AIService:
             # SU Hour per Tool
             ("su hour per tool", "su_hour_per_tool"),
             ("startup hour per tool", "su_hour_per_tool"),
+            ("start up hour per tool", "su_hour_per_tool"),
+            ("start-up hour per tool", "su_hour_per_tool"),
             ("su hour", "su_hour_per_tool"),
             ("su工时", "su_hour_per_tool"),
             ("平均装机时间", "su_hour_per_tool"),
@@ -538,6 +585,23 @@ class AIService:
             ("人员", "headcount")
         ]
 
+        user_secondary_kpis = [
+            "OT Ratio", "OT per HC(Month)", "OT>36 HC", "Over 36 H Rate", "OT>60 HC", 
+            "WLB", "WLB only workday", "Service Sales Projection (M JPY)", 
+            "Service Sales Achieve Ratio", "Service Revenue Achieve Ratio", 
+            "Achievement(Projection/Budget)", "Achievement(Actual/Projection)", 
+            "Rev/WoT(KJPY)", "Rev/Hour(CNY)", "SMR%", "Wrench Ratio", "Direct Ratio", 
+            "Non-strategic Concession Hour", "Non-strategic Concession Hours Per Tool", 
+            "Startup Hour per Tool", "Startup Cost per Tool", "Warranty Hour per Tool(Month)", 
+            "Warranty Cost per Tool(Month)", "WO Survey", "Survey Return Rate", 
+            "Survey Score<9.2", "Auto WO Rate", "Customer Rate", "Trouble WO >72H", 
+            "MTTR", "MTTCWO", "THTR", "SOLT", "SOLT(excl. SU Pending duration)", 
+            "Machine", "HeadCount", "CustomerAwards"
+        ]
+        user_secondary_kpis.sort(key=len, reverse=True)
+        for k in user_secondary_kpis:
+            priority_keywords.append((k.lower(), k))
+
         # Check if the query contains a NEW KPI
         query_lower = query.lower()
         new_kpi = None
@@ -545,6 +609,87 @@ class AIService:
             if kw in query_lower:
                 new_kpi = kpi_key
                 break
+
+        if not new_kpi:
+            known_products_upper = {p.upper() for p in known_products}
+            short_tokens = re.findall(r"[A-Za-z]{2,4}", query)
+            short_tokens = [
+                t
+                for t in short_tokens
+                if t
+                and t.upper() not in known_products_upper
+                and not (t.upper().startswith("FY") and re.fullmatch(r"FY\\d{2,4}", t.upper()))
+                and t.lower() not in {"kpi", "sql", "sn", "tool", "tools", "product", "organization", "ratio"}
+            ]
+            if short_tokens and re.search(r"[\\u4e00-\\u9fa5]", query):
+                new_kpi = short_tokens[-1].upper()
+
+        if not new_kpi and enable_llm_intent and llm_strategy in {"llm_first", "kpi_llm_first"}:
+            kpi_keys = list(kpi_definitions.keys())
+            secondary_kpis_seed = [
+                "OT",
+                "OT Ratio", "OT per HC(Month)", "OT>36 HC", "Over 36 H Rate", "OT>60 HC",
+                "WLB", "WLB only workday", "Service Sales Projection (M JPY)",
+                "Service Sales Achieve Ratio", "Service Revenue Achieve Ratio",
+                "Achievement(Projection/Budget)", "Achievement(Actual/Projection)",
+                "Rev/WoT(KJPY)", "Rev/Hour(CNY)", "SMR%", "Wrench Ratio", "Direct Ratio",
+                "Non-strategic Concession Hour", "Non-strategic Concession Hours Per Tool",
+                "Startup Hour per Tool", "Start up hour per tool", "Start-up hour per tool",
+                "Startup Cost per Tool", "Warranty Hour per Tool(Month)",
+                "Warranty Cost per Tool(Month)", "WO Survey", "Survey Return Rate",
+                "Survey Score<9.2", "Auto WO Rate", "Customer Rate", "Trouble WO >72H",
+                "MTTR", "MTTCWO", "THTR", "SOLT", "SOLT(excl. SU Pending duration)",
+                "Machine", "HeadCount", "CustomerAwards",
+            ]
+            kpi_prompt = f"""
+            [Task]
+            从用户问题中识别 KPI，只返回 JSON。
+
+            [User Query]
+            "{query}"
+
+            [Known KPI Keys]
+            {json.dumps(kpi_keys, ensure_ascii=False)}
+
+            [Secondary KPI Names]
+            {json.dumps(secondary_kpis_seed, ensure_ascii=False)}
+
+            [Rules]
+            - 输出的 kpi 必须优先选择 Known KPI Keys 里的 key；如果用户说的是同义词/变体，请映射到对应 key。
+            - 例："su hour per tool" / "startup hour per tool" / "start up hour per tool" / "平均装机小时数" => "su_hour_per_tool"
+            - 例："TPS今年OT是多少" => "OT"
+            - 不要把产品线/组织名（如 TPS/CT/SPS）当作 KPI。
+
+            [Output Format]
+            {{"kpi":"..."}}
+            """
+            response_text = self.generate_response(kpi_prompt)
+            llm_kpi = None
+            try:
+                start = response_text.find("{")
+                end = response_text.rfind("}") + 1
+                if start != -1 and end != -1:
+                    obj = json.loads(response_text[start:end])
+                    llm_kpi = (obj.get("kpi") or "").strip()
+            except Exception:
+                llm_kpi = None
+
+            if llm_kpi and llm_kpi.upper() not in {p.upper() for p in known_products}:
+                new_kpi = llm_kpi
+
+        if not new_kpi:
+            known_products_upper = {p.upper() for p in known_products}
+            ascii_tokens = re.findall(r"[A-Za-z]{2,10}", query)
+            ascii_tokens = [
+                t
+                for t in ascii_tokens
+                if t
+                and t.upper() not in known_products_upper
+                and not (t.upper().startswith("FY") and re.fullmatch(r"FY\d{2,4}", t.upper()))
+                and t.lower() not in {"kpi", "sql", "sn", "tool", "tools", "product", "organization"}
+            ]
+            if ascii_tokens and re.search(r"[\u4e00-\u9fa5]", query):
+                new_kpi = ascii_tokens[-1].upper()
         
         # Generic fallback for unknown KPIs (e.g. "ot是多少", "查询abc")
         if not new_kpi:
@@ -565,6 +710,17 @@ class AIService:
                     candidate = re.sub(r"\s+", " ", candidate)
                     candidate = re.sub(r"(是|为)$", "", candidate)
                     candidate = re.sub(r"[，,。.!！？?；;:：]+$", "", candidate).strip()
+                    if re.search(r"[\u4e00-\u9fa5]", candidate) and re.search(r"[A-Za-z]", candidate):
+                        parts = re.findall(r"[A-Za-z]{2,10}", candidate)
+                        parts = [
+                            t
+                            for t in parts
+                            if t
+                            and t.upper() not in {p.upper() for p in known_products}
+                            and t.lower() not in {"kpi", "sql", "sn", "tool", "tools", "product", "organization"}
+                        ]
+                        if parts:
+                            candidate = parts[-1].upper()
                     if re.search(r"[A-Za-z]", candidate):
                         candidate = re.sub(r"(有|吗|呢|啊|呀|吧|的|么|啦|哈)+$", "", candidate).strip()
                         if (
@@ -607,7 +763,6 @@ class AIService:
 
         # 2. Extract Time and Scope manually
         from datetime import datetime
-        known_products = ["CT", "3DI", "SPS", "ES", "SSP", "TPS", "TS", "FSI", "Certas", "SD", "Epion", "FPD"]
 
         time_all_intent_strong = (
             bool(re.search(r"(所有|全部)\s*范围", query))
@@ -901,8 +1056,21 @@ class AIService:
             available_scopes = [s['value'] for s in all_categories]
 
         result = {"kpi": matched_kpi, "time_range": extracted_time, "scope": found_scopes, "missing_params": [], "finished_selection": False}
-        enable_llm_intent = os.getenv("BOTTUN_ENABLE_LLM_INTENT", "false").lower() == "true"
-        if enable_llm_intent:
+        if enable_llm_intent and (enable_llm_full_intent or llm_strategy not in {"llm_first", "kpi_llm_first"}):
+            secondary_kpis = [
+                "OT", "OT Ratio", "OT per HC(Month)", "OT>36 HC", "Over 36 H Rate", "OT>60 HC", 
+                "WLB", "WLB only workday", "Service Sales Projection (M JPY)", 
+                "Service Sales Achieve Ratio", "Service Revenue Achieve Ratio", 
+                "Achievement(Projection/Budget)", "Achievement(Actual/Projection)", 
+                "Rev/WoT(KJPY)", "Rev/Hour(CNY)", "SMR%", "Wrench Ratio", "Direct Ratio", 
+                "Non-strategic Concession Hour", "Non-strategic Concession Hours Per Tool", 
+                "Startup Hour per Tool", "Startup Cost per Tool", "Warranty Hour per Tool(Month)", 
+                "Warranty Cost per Tool(Month)", "WO Survey", "Survey Return Rate", 
+                "Survey Score<9.2", "Auto WO Rate", "Customer Rate", "Trouble WO >72H", 
+                "MTTR", "MTTCWO", "THTR", "SOLT", "SOLT(excl. SU Pending duration)", 
+                "Machine", "HeadCount", "CustomerAwards"
+            ]
+            
             prompt = f"""
             [Role]
             你是一个专业的数据分析助手，负责从用户查询中提取关键参数。
@@ -913,8 +1081,9 @@ class AIService:
                - Time Range: {extracted_time}
                - Scope: {json.dumps(found_scopes, ensure_ascii=False)}
             2. 可选指标 (Available KPIs): {json.dumps(kpi_info, ensure_ascii=False)}
-            3. 可选维度分类 (Available Scopes categories): {available_scopes}
-            4. 当前日期: {current_date.strftime('%Y-%m-%d')}
+            3. 已知二级指标 (Secondary KPIs): {json.dumps(secondary_kpis, ensure_ascii=False)}
+            4. 可选维度分类 (Available Scopes categories): {available_scopes}
+            5. 当前日期: {current_date.strftime('%Y-%m-%d')}
             
             [User Query]
             "{query}"
@@ -923,11 +1092,14 @@ class AIService:
             基于当前上下文和用户新的查询，更新并提取 KPI、时间范围 (time_range) 和维度范围 (scope)。同时判断用户是否已经表达了“完成选择”或“不需要更多”的意图。
             
             [Rules]
-            1. KPI 识别：如果上下文已有 KPI 且查询未明确更改，请保持现状。如果用户查询中包含看起来像指标的名词（特别是出现在“查询xx”、“xx是多少”、“xx的趋势”等句式中），即使它不在可选指标列表中，也请将其提取为 KPI。
+            1. KPI 识别：
+               - 优先匹配 "Available KPIs" 中的指标。
+               - 如果用户查询的词汇与 "Secondary KPIs" 列表中的某项高度相似或包含其中关键词（如 "OT" 对应 "OT Ratio" 或其他 OT 相关指标），请提取用户原始提到的核心词汇（如 "OT"），或者如果用户明确指代了某个二级指标，则提取该二级指标的完整名称。
+               - 如果用户查询包含看起来像指标的名词（如“查询xx”、“xx是多少”、“xx今年OT”等），即使不在列表中，也请提取。例如："OT" 应被提取为 KPI。
             2. Scope 识别:
                - 识别具体的部门、团队、机台序列号。
-               - 部门（如 "CT", "3DI", "SPS", "ES"）映射为 "product"。
-               - 团队名称映射为 "organization"。
+               - 部门（如 "CT", "3DI", "ES", "SPS", "TPS"）映射为 "product"。
+               - 团队名称或组织名称（如 "CXMT-SPS"）映射为 "organization"。
                - 机台 SN（如 100367）映射为 "tools"。
                - 格式必须为 "category:value"。
             3. 否定意图识别 (Negative Intent Recognition):

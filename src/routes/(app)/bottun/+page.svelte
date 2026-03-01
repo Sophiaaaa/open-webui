@@ -68,7 +68,9 @@
                     kpi: analysis.kpi,
                     time_range: analysis.time_range,
                     scope: analysis.scope,
-                    missing_params: analysis.missing_params
+                    missing_params: analysis.missing_params,
+					scope_prompted:
+						analysis.missing_params?.includes('scope') ? true : (currentContext?.scope_prompted ?? false)
                 };
                 
                 // If missing params, Bot asks for them
@@ -76,7 +78,10 @@
                      let replyContent = "我需要更多信息才能查询。";
                      if (analysis.missing_params.includes('kpi')) replyContent = "请选择想要查询的指标 (KPI):";
                      else if (analysis.missing_params.includes('time_range')) replyContent = "请指定时间范围:";
-                     else if (analysis.missing_params.includes('scope')) replyContent = `请补充筛选条件 (KPI: ${analysis.kpi}):`;
+                    else if (analysis.missing_params.includes('scope'))
+						replyContent = analysis.scope && analysis.scope.length > 0
+							? `请补充筛选条件 (KPI: ${analysis.kpi}):`
+							: '请选择对象范围:';
                      
                      messages = [...messages, {
                          content: replyContent,
@@ -100,6 +105,9 @@
                     if (res) {
                          // Build summary content
                          let summary = res.summary || "查询完成。";
+						 if (analysis.scope_fallback_all) {
+						 	summary = `未识别出对象范围，已经按照全量范围给出结果。\n\n${summary}`;
+						 }
                          if (res.sql) summary += `\n\n\`\`\`sql\n${res.sql}\n\`\`\``;
                          
                          // Visualization Logic (Mock for now, just text or check columns)

@@ -367,6 +367,8 @@ async def chat_completions(request: OpenAIChatCompletionRequest):
             current_context["time_range"] = meta.get("time_range")
         if "scope" in meta:
             current_context["scope"] = meta.get("scope") if isinstance(meta.get("scope"), list) else []
+        if "user_query" in meta:
+            current_context["user_query"] = meta.get("user_query")
         if meta.get("scope_prompted") is not None:
             current_context["scope_prompted"] = bool(meta.get("scope_prompted"))
         if meta.get("unsupported_kpi_notified") is not None:
@@ -379,6 +381,7 @@ async def chat_completions(request: OpenAIChatCompletionRequest):
     response_text = ""
     meta: Dict[str, Any] = {
         "kpi": final_analysis.get("kpi"),
+        "user_query": (current_context.get("user_query") or latest_user_msg.content),
         "time_range": final_analysis.get("time_range"),
         "scope": final_analysis.get("scope"),
         "missing_params": final_analysis.get("missing_params"),
@@ -448,7 +451,7 @@ async def chat_completions(request: OpenAIChatCompletionRequest):
                 if recognized:
                     response_text = f"已识别到对象范围：{recognized}。请问还需要补充其他对象范围吗？（回答“没有/不需要/就这样/全部”即可开始查询）"
                 else:
-                    response_text = "您好，请选择对象范围"
+                    response_text = "请选择对象范围"
 
             meta["scope_prompted"] = True
     else:
@@ -476,6 +479,9 @@ async def chat_completions(request: OpenAIChatCompletionRequest):
                 result.get('data', []), 
                 kpi_config
             )
+            if final_analysis.get("scope_fallback_all"):
+                response_text = "未识别出对象范围，已经按照全量范围给出结果。\n\n" + (response_text or "")
+                meta["scope_fallback_all"] = True
 
             pass
         except Exception as e:

@@ -76,21 +76,34 @@ PY
 export OPEN_WEBUI_ENABLE_KPI_BOT="$ENABLE_KPI_BOT"
 export OPEN_WEBUI_ENABLE_BKM_BOT="$ENABLE_BKM_BOT"
 
-base_urls="${OPENAI_API_BASE_URLS:-https://api.openai.com/v1}"
-api_keys="${OPENAI_API_KEYS:-${OPENAI_API_KEY:-sk-placeholder}}"
+base_urls="${OPENAI_API_BASE_URLS:-}"
+api_keys="${OPENAI_API_KEYS:-${OPENAI_API_KEY:-}}"
+
+urls=()
+keys=()
+
+if [[ -n "$base_urls" ]]; then
+  IFS=';' read -r -a urls <<<"$base_urls"
+  IFS=';' read -r -a keys <<<"$api_keys"
+else
+  if [[ -n "$api_keys" && "$api_keys" != "sk-placeholder" ]]; then
+    urls+=("https://api.openai.com/v1")
+    keys+=("$api_keys")
+  fi
+fi
 
 if [[ "$ENABLE_KPI_BOT" == "true" ]]; then
-  base_urls="$base_urls;http://localhost:${PORT}/bottun/v1"
-  api_keys="$api_keys;any"
+  urls+=("http://localhost:${PORT}/bottun/v1")
+  keys+=("any")
 fi
 
 if [[ "$ENABLE_BKM_BOT" == "true" ]]; then
-  base_urls="$base_urls;http://localhost:${PORT}/bkm/v1"
-  api_keys="$api_keys;any"
+  urls+=("http://localhost:${PORT}/bkm/v1")
+  keys+=("any")
 fi
 
-export OPENAI_API_BASE_URLS="$base_urls"
-export OPENAI_API_KEYS="$api_keys"
+export OPENAI_API_BASE_URLS="$(IFS=';'; echo "${urls[*]}")"
+export OPENAI_API_KEYS="$(IFS=';'; echo "${keys[*]}")"
 
 export RESET_CONFIG_ON_START="${RESET_CONFIG_ON_START:-True}"
 export ENABLE_BASE_MODELS_CACHE="${ENABLE_BASE_MODELS_CACHE:-False}"

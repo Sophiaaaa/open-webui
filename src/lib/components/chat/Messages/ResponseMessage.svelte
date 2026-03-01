@@ -69,6 +69,7 @@
 
 	type BottunMeta = {
 		kpi?: string | null;
+		user_query?: string | null;
 		time_range?: string | null;
 		scope?: string[] | null;
 		sql?: string | null;
@@ -569,6 +570,7 @@
 	async function startBottunNewConversation() {
 		const resetMeta = {
 			kpi: null,
+			user_query: null,
 			time_range: null,
 			scope: [],
 			missing_params: ['kpi'],
@@ -1486,14 +1488,18 @@
 
 					{#if model?.info?.meta?.is_bottun_rule_bot && bottunMeta && (bottunMeta.kpi || bottunMeta.time_range || (bottunMeta.scope && bottunMeta.scope.length > 0) || bottunMeta.sql)}
 						<div class="mt-2 text-xs text-gray-400 italic">
-							{#if bottunMeta.kpi}
+							{#if bottunMeta.unsupported_kpi}
+								<div>需求：{bottunMeta.user_query ?? bottunMeta.kpi}</div>
+							{:else if bottunMeta.kpi}
 								<div>KPI：{bottunMeta.kpi}</div>
 							{/if}
 							{#if bottunMeta.time_range}
 								<div>时间范围：{formatBottunTimeRange(bottunMeta.time_range)}</div>
 							{/if}
 							{#if bottunMeta.scope && bottunMeta.scope.length > 0}
-								<div>筛选条件：{bottunMeta.scope.join(', ')}</div>
+								<div>对象范围：{bottunMeta.scope.join(', ')}</div>
+							{:else if !bottunMissing.includes('scope')}
+								<div>对象范围：all（不限制对象）</div>
 							{/if}
 							{#if bottunMeta.sql}
 								<details class="mt-1">

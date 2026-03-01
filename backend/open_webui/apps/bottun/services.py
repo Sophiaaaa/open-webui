@@ -450,6 +450,19 @@ class AIService:
     def __init__(self, model: str = "qwen2.5-coder:1.5b", base_url: str = "http://localhost:11434/v1"):
         self.model = os.getenv("BOTTUN_LLM_MODEL") or model
         self.base_url = os.getenv("BOTTUN_LLM_BASE_URL") or base_url
+        try:
+            self.max_tokens = int(os.getenv("BOTTUN_LLM_MAX_TOKENS", "256"))
+        except Exception:
+            self.max_tokens = 256
+        try:
+            self.num_predict = int(os.getenv("BOTTUN_LLM_NUM_PREDICT", str(self.max_tokens)))
+        except Exception:
+            self.num_predict = self.max_tokens
+        try:
+            self.timeout_seconds = float(os.getenv("BOTTUN_LLM_TIMEOUT", "30"))
+        except Exception:
+            self.timeout_seconds = 30.0
+        self._session = requests.Session()
 
     def generate_response(self, prompt: str) -> str:
         try:
@@ -469,20 +482,22 @@ class AIService:
                     {"role": "user", "content": prompt},
                 ],
                 "temperature": 0,
+                "max_tokens": max(1, int(self.max_tokens)),
             }
 
-            response = requests.post(openai_url, json=payload, timeout=30)
+            response = self._session.post(openai_url, json=payload, timeout=self.timeout_seconds)
             if response.status_code == 404:
                 ollama_url = f"{base_root}/api/chat"
                 ollama_payload = {
                     "model": self.model,
                     "messages": payload["messages"],
                     "stream": False,
-                    "options": {"temperature": 0},
+                    "keep_alive": os.getenv("BOTTUN_LLM_KEEP_ALIVE", "10m"),
+                    "options": {"temperature": 0, "num_predict": max(1, int(self.num_predict))},
                 }
-                response = requests.post(ollama_url, json=ollama_payload, timeout=30)
+                response = self._session.post(ollama_url, json=ollama_payload, timeout=self.timeout_seconds)
                 if not response.ok:
-                    tags = requests.get(f"{base_root}/api/tags", timeout=10).json()
+                    tags = self._session.get(f"{base_root}/api/tags", timeout=10).json()
                     models = tags.get("models") if isinstance(tags, dict) else None
                     if isinstance(models, list) and models:
                         fallback_model = None
@@ -500,7 +515,7 @@ class AIService:
                         if fallback_model:
                             self.model = str(fallback_model)
                             ollama_payload["model"] = self.model
-                            response = requests.post(ollama_url, json=ollama_payload, timeout=30)
+                            response = self._session.post(ollama_url, json=ollama_payload, timeout=self.timeout_seconds)
 
             response.raise_for_status()
             data = response.json()
@@ -604,6 +619,8 @@ class AIService:
 
         # Check if the query contains a NEW KPI
         query_lower = query.lower()
+        normalized_reply = re.sub(r"[\s,，。.!！？?；;:：]", "", query_lower).strip()
+        selection_keywords = {"所有", "全部", "all", "不限", "不限制", "不限定", "无", "没有", "不用", "不用了", "不需要", "不需要了", "跳过", "就这样", "没", "没了"}
         new_kpi = None
         for kw, kpi_key in priority_keywords:
             if kw in query_lower:
@@ -623,6 +640,9 @@ class AIService:
             ]
             if short_tokens and re.search(r"[\\u4e00-\\u9fa5]", query):
                 new_kpi = short_tokens[-1].upper()
+
+        if (not new_kpi) and context_kpi and (normalized_reply in selection_keywords or len(normalized_reply) <= 3):
+            new_kpi = context_kpi
 
         if not new_kpi and enable_llm_intent and llm_strategy in {"llm_first", "kpi_llm_first"}:
             kpi_keys = list(kpi_definitions.keys())
@@ -781,7 +801,42 @@ class AIService:
             and bool(context_kpi or context_scope)
         )
 
-        time_all_intent = time_all_intent_strong or time_all_intent_weak
+        time_all_intent_kpi = (
+            bool(re.search(r"(所有|全部)", query))
+            and not extracted_time
+            and bool(matched_kpi)
+            and not bool(re.search(r"(FY\s*\d{2,4}|20\d{2}|\d{2}\s*年|季度|半期|月度|年度|财年|时间|日期|月份|范围)", query))
+        )
+
+        time_all_intent = time_all_intent_strong or time_all_intent_weak or time_all_intent_kpi
+
+        invalid_time_input = False
+        for y, mo in re.findall(r"(?<!\d)(20\d{2})\s*[-/]\s*(\d{1,2})(?!\d)", query):
+            try:
+                mi = int(mo)
+            except Exception:
+                continue
+            if mi < 1 or mi > 12:
+                invalid_time_input = True
+                break
+        if not invalid_time_input:
+            for y, mo in re.findall(r"(20\d{2}|\d{2})\s*年\s*(\d{1,2})\s*月", query):
+                try:
+                    mi = int(mo)
+                except Exception:
+                    continue
+                if mi < 1 or mi > 12:
+                    invalid_time_input = True
+                    break
+        if not invalid_time_input:
+            for y, q in re.findall(r"(?<![0-9A-Za-z])(20\d{2}|\d{2})\s*[-]?\s*[Qq]\s*([0-9])(?![0-9A-Za-z])", query):
+                try:
+                    qi = int(q)
+                except Exception:
+                    continue
+                if qi < 1 or qi > 4:
+                    invalid_time_input = True
+                    break
         
         # Pre-process shortcuts
         current_date = datetime.now()
@@ -871,6 +926,7 @@ class AIService:
                 return _natural_quarter_range(y, q)
 
             t = re.sub(r"(20\d{2}|\d{2})\s*年\s*[Qq]([1-4])", repl_quarter_q, t)
+            t = re.sub(r"(?<![0-9A-Za-z])(20\d{2}|\d{2})\s*[-]?\s*[Qq]([1-4])(?![0-9A-Za-z])", repl_quarter_q, t)
 
             # Chinese year formats: 2024年 / 24年
             def repl_year_cn(m):
@@ -888,7 +944,7 @@ class AIService:
                 y2 = int(m.group(2))
                 return f"{_ym(y1, 1)}-{_ym(y2, 12)}"
 
-            t = re.sub(r"(20\d{2})\s*[-~至到]\s*(20\d{2})", repl_year_range, t)
+            t = re.sub(r"(?<!\d)(20\d{2})\s*[-~至到]\s*(20\d{2})(?!\d)", repl_year_range, t)
 
             # Fiscal half-year: FY26 2H / FY26 H2 / FY26 下半期 / FY26 上半期
             def repl_fy_half(m):
@@ -928,19 +984,103 @@ class AIService:
         # Fiscal Year Logic: Starts April 1st
         fy_start_year = current_year if current_month >= 4 else current_year - 1
         fy_end_year = fy_start_year + 1
+        prev_fy_start_year = fy_start_year - 1
+        prev_fy_end_year = fy_end_year - 1
 
         if "当前财年" in query:
             query = query.replace("当前财年", f" {fy_start_year}04-{fy_end_year}03 ")
 
-        if "半期" in query:
-            if 4 <= current_month <= 9:
-                query = query.replace("半期", f" {fy_start_year}04-{fy_start_year}09 ")
-            else:
-                query = query.replace("半期", f" {fy_start_year}10-{fy_end_year}03 ")
+        if "本财年" in query:
+            query = query.replace("本财年", f" {fy_start_year}04-{fy_end_year}03 ")
+
+        if "上个财年" in query or "上一财年" in query:
+            query = query.replace("上个财年", f" {prev_fy_start_year}04-{prev_fy_end_year}03 ")
+            query = query.replace("上一财年", f" {prev_fy_start_year}04-{prev_fy_end_year}03 ")
+
+        query = re.sub(
+            r"\b(?:fiscal\s*year)\s*(\d{2}|20\d{2})\b",
+            r"FY\1",
+            query,
+            flags=re.IGNORECASE,
+        )
+        query = re.sub(r"(?:财年|财政年度)\s*(\d{2}|20\d{2})", r"FY\1", query)
+
+        current_fy_end_year = fy_end_year
+        current_half = 1 if 4 <= current_month <= 9 else 2
+
+        def _prev_fiscal_half(fy_end_year_value: int, half_value: int) -> tuple[int, int]:
+            if half_value == 2:
+                return fy_end_year_value, 1
+            return fy_end_year_value - 1, 2
+
+        def _shift_fiscal_half_back(
+            fy_end_year_value: int, half_value: int, steps: int
+        ) -> tuple[int, int]:
+            fy = fy_end_year_value
+            h = half_value
+            for _ in range(max(0, steps)):
+                fy, h = _prev_fiscal_half(fy, h)
+            return fy, h
+
+        if "当前半期" in query:
+            query = query.replace(
+                "当前半期", f" {_fiscal_half_range(current_fy_end_year, current_half)} "
+            )
+        if "本半期" in query:
+            query = query.replace(
+                "本半期", f" {_fiscal_half_range(current_fy_end_year, current_half)} "
+            )
+
+        if "上个半期" in query or "上一半期" in query:
+            prev_fy, prev_h = _prev_fiscal_half(current_fy_end_year, current_half)
+            prev_range = _fiscal_half_range(prev_fy, prev_h)
+            query = query.replace("上个半期", f" {prev_range} ")
+            query = query.replace("上一半期", f" {prev_range} ")
+
+        cn_num = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+        def repl_prev_n_halves(m):
+            raw = (m.group(1) or "").strip()
+            n = cn_num.get(raw)
+            if n is None and raw.isdigit():
+                n = int(raw)
+            if not n or n <= 0:
+                return m.group(0)
+            end_fy, end_h = _shift_fiscal_half_back(current_fy_end_year, current_half, 1)
+            start_fy, start_h = _shift_fiscal_half_back(current_fy_end_year, current_half, n)
+            start_range = _fiscal_half_range(start_fy, start_h)
+            end_range = _fiscal_half_range(end_fy, end_h)
+            start_ym = start_range.split("-", 1)[0]
+            end_ym = end_range.split("-", 1)[1]
+            return f" {start_ym}-{end_ym} "
+
+        query = re.sub(r"前\s*([一二三四五六七八九十\d]+)\s*个半期", repl_prev_n_halves, query)
+
+        query = re.sub(
+            r"(?<!上个)(?<!上一)(?<!前\d)(?<!前一)(?<!前二)(?<!前三)(?<!前四)(?<!前五)(?<!前六)(?<!前七)(?<!前八)(?<!前九)(?<!前十)半期",
+            lambda _: f" {_fiscal_half_range(current_fy_end_year, current_half)} ",
+            query,
+        )
+
+        def repl_prev_n_fys(m):
+            raw = (m.group(1) or "").strip()
+            n = cn_num.get(raw)
+            if n is None and raw.isdigit():
+                n = int(raw)
+            if not n or n <= 0:
+                return m.group(0)
+            start_fy_end = current_fy_end_year - (n - 1)
+            start_range = _fiscal_year_range(start_fy_end)
+            end_range = _fiscal_year_range(current_fy_end_year)
+            start_ym = start_range.split("-", 1)[0]
+            end_ym = end_range.split("-", 1)[1]
+            return f" {start_ym}-{end_ym} "
+
+        query = re.sub(r"前\s*([一二三四五六七八九十\d]+)\s*个财年", repl_prev_n_fys, query)
 
         query = _normalize_time_expressions(query)
 
-        if time_all_intent_strong or (time_all_intent_weak and not extracted_time):
+        if time_all_intent_strong or time_all_intent_kpi or (time_all_intent_weak and not extracted_time):
             extracted_time = "all"
 
         # 2a. Extract Time first to avoid misidentifying it as SN
@@ -958,6 +1098,32 @@ class AIService:
         if new_time:
             extracted_time = new_time
 
+        time_error_message = None
+
+        def _is_valid_ym(s: str) -> bool:
+            if not re.fullmatch(r"20\d{4}", s or ""):
+                return False
+            try:
+                mo = int(s[-2:])
+            except Exception:
+                return False
+            return 1 <= mo <= 12
+
+        if extracted_time and str(extracted_time).strip().lower() not in {"all"} and not str(extracted_time).upper().startswith("FY"):
+            et = str(extracted_time).strip()
+            if "-" in et:
+                m = re.fullmatch(r"(20\d{4})-(20\d{4})", et)
+                if not m or (not _is_valid_ym(m.group(1))) or (not _is_valid_ym(m.group(2))) or (int(m.group(1)) > int(m.group(2))):
+                    invalid_time_input = True
+                    extracted_time = None
+            else:
+                if not _is_valid_ym(et):
+                    invalid_time_input = True
+                    extracted_time = None
+
+        if invalid_time_input and not extracted_time and not time_all_intent:
+            time_error_message = "时间格式有误，请重新选择时间范围  \n如需要自定义范围，请按此例填写202501-202506"
+
         # 2b. Extract Scopes
         new_scopes = []
 
@@ -972,7 +1138,9 @@ class AIService:
 
         for prod in known_products:
             if re.search(rf"(?<![A-Za-z0-9_]){re.escape(prod)}(?![A-Za-z0-9_])", query, flags=re.IGNORECASE):
-                new_scopes.append(f"product:{prod}")
+                scope_str = f"product:{prod}"
+                if scope_str not in new_scopes and scope_str not in found_scopes:
+                    new_scopes.append(scope_str)
 
         # Manual SN extraction (6 digits)
         # Avoid numbers starting with '20' if they look like the extracted time
@@ -1046,7 +1214,7 @@ class AIService:
                     found_scopes.append(s)
 
         # 4. AI Analysis (optional; can be expensive/slow)
-        kpi_info = {k: v.get('description', '') for k, v in kpi_definitions.items()}
+        kpi_info = list(kpi_definitions.keys())
         all_categories = ui_mappings.get('scope_options', {}).get('categories', [])
         
         if matched_kpi and matched_kpi in kpi_definitions:
@@ -1056,7 +1224,14 @@ class AIService:
             available_scopes = [s['value'] for s in all_categories]
 
         result = {"kpi": matched_kpi, "time_range": extracted_time, "scope": found_scopes, "missing_params": [], "finished_selection": False}
-        if enable_llm_intent and (enable_llm_full_intent or llm_strategy not in {"llm_first", "kpi_llm_first"}):
+        if time_error_message:
+            result["response_message"] = time_error_message
+        if enable_llm_intent and (enable_llm_full_intent or llm_strategy not in {"llm_first", "kpi_llm_first"}) and not (
+            normalized_reply in selection_keywords
+            and (context_kpi or matched_kpi)
+            and (context_time or extracted_time)
+            and ("时间" not in query_lower and "time" not in query_lower and "范围" not in query_lower)
+        ):
             secondary_kpis = [
                 "OT", "OT Ratio", "OT per HC(Month)", "OT>36 HC", "Over 36 H Rate", "OT>60 HC", 
                 "WLB", "WLB only workday", "Service Sales Projection (M JPY)", 
@@ -1143,6 +1318,14 @@ class AIService:
             except:
                 pass
 
+        if (
+            context_time
+            and str(result.get("time_range") or "").strip().lower() == "all"
+            and normalized_reply in {"所有", "全部", "all", "不限", "不限制", "不限定"}
+            and ("时间" not in query_lower and "time" not in query_lower and "范围" not in query_lower)
+        ):
+            result["time_range"] = context_time
+
         # --- Proactive Missing Params Logic ---
         missing = []
         
@@ -1187,11 +1370,13 @@ class AIService:
 
             if not current_categories and not is_finished_selection:
                 if scope_prompted:
+                    result["scope_fallback_all"] = True
                     result['finished_selection'] = True
                 else:
                     missing.append('scope')
             elif current_categories and missing_categories and not is_finished_selection:
                 if scope_prompted:
+                    result["scope_fallback_all"] = True
                     result['finished_selection'] = True
                 else:
                     result['is_proactive_scope'] = True
@@ -1215,26 +1400,23 @@ class AIService:
                     missing.append('scope')
 
             base_msg = (
-                f"暂未支持指标 '{result['kpi']}' 的查询。"
-                "我们希望完整收集您的需求并同步给负责人。"
+                "暂未上线这个指标。我们希望完整收集您的需求并同步给负责人。"
             )
 
             next_missing: List[str] = []
             response_parts: List[str] = []
 
-            if not unsupported_kpi_notified:
-                response_parts.append(base_msg)
-                result["unsupported_kpi_notified"] = True
-            else:
-                result["unsupported_kpi_notified"] = True
+            result["unsupported_kpi_notified"] = True
 
             if 'time_range' in missing:
                 next_missing = ['time_range']
+                response_parts.append(base_msg)
                 response_parts.append(
                     "可以在补充一下时间范围吗？可点击下方快捷按钮，也可以自定义时间范围，示例：202501-202506."
                 )
             elif 'scope' in missing:
                 next_missing = ['scope']
+                response_parts.append(base_msg)
                 if all_scope_categories:
                     result["missing_scope_categories"] = all_scope_categories
                 response_parts.append(
@@ -1250,9 +1432,13 @@ class AIService:
                     if scope_str:
                         recognized_parts.append(f"对象范围={scope_str}")
                 if recognized_parts:
-                    response_parts.append("已收到补充信息：" + "；".join(recognized_parts) + "。我们会用于评估该需求。")
+                    response_parts.append(
+                        "暂未上线这个指标，已收到补充信息："
+                        + "；".join(recognized_parts)
+                        + "。我们会用于评估该需求。"
+                    )
                 else:
-                    response_parts.append("已收到您的问题，我们会用于评估该需求。")
+                    response_parts.append("暂未上线这个指标，已收到您的问题，我们会用于评估该需求。")
             
             # Log the request (record current state)
             if db_service:

@@ -24,10 +24,16 @@
 
 	let introText = '';
 	let pairedItems: { idx: number; cause: BkmRankedText | null; action: BkmRankedText | null }[] = [];
+	const DEFAULT_ACTION_SUGGESTION_MIN_SCORE = 0.75;
+	let actionSuggestionMinScore = DEFAULT_ACTION_SUGGESTION_MIN_SCORE;
 
 	const dispatch = createEventDispatcher();
 
 	$: introText = typeof message?.answer_markdown === 'string' ? (message.answer_markdown.split('\n')[0] || '') : '';
+	$: actionSuggestionMinScore =
+		typeof message?.action_suggestion_min_score === 'number'
+			? message.action_suggestion_min_score
+			: DEFAULT_ACTION_SUGGESTION_MIN_SCORE;
 
 	$: pairedItems = (() => {
 		const causes = Array.isArray(message?.causes) ? message.causes : [];
@@ -37,8 +43,18 @@
 			idx,
 			cause: causes[idx] ?? null,
 			action: actions[idx] ?? null
-		}));
+		})).filter((pair) => shouldShowPair(pair.cause, pair.action));
 	})();
+
+	function shouldShowCause(cause: BkmRankedText | null): boolean {
+		if (!cause) return false;
+		const score = typeof cause.score === 'number' ? cause.score : 0;
+		return score >= actionSuggestionMinScore;
+	}
+
+	function shouldShowPair(cause: BkmRankedText | null, action: BkmRankedText | null): boolean {
+		return shouldShowCause(cause) || shouldShowAction(action, cause);
+	}
 
 	function getDocsForEntryIds(entryIds: string[]): BkmDocHit[] {
 		const seen = new Set<string>();
@@ -64,9 +80,19 @@
 		const primary = pair.cause ?? pair.action;
 		if (!primary) return;
 		const kind: 'cause' | 'action' = pair.cause ? 'cause' : 'action';
-		const entryIds = [pair.cause?.id, pair.action?.id].filter(Boolean) as string[];
+		const entryIds = [
+			shouldShowCause(pair.cause) ? pair.cause?.id : null,
+			shouldShowAction(pair.action, pair.cause) ? pair.action?.id : null
+		].filter(Boolean) as string[];
 		const docs = getDocsForEntryIds(entryIds);
 		dispatch('selectItem', { kind, entry: primary, docs });
+	}
+
+	function shouldShowAction(action: BkmRankedText | null, cause: BkmRankedText | null): boolean {
+		if (!action) return false;
+		if (!cause) return true;
+		const score = typeof action.score === 'number' ? action.score : 0;
+		return score >= actionSuggestionMinScore;
 	}
 
 	function dispatchItemRating(payload: { kind: 'cause' | 'action'; entry: BkmRankedText; rating: ItemRating }) {
@@ -81,8 +107,10 @@
 	) {
 		e.preventDefault();
 		e.stopPropagation();
-		if (pair.cause) dispatchItemRating({ kind: 'cause', entry: pair.cause, rating });
-		if (pair.action) dispatchItemRating({ kind: 'action', entry: pair.action, rating });
+		if (pair.cause && shouldShowCause(pair.cause))
+			dispatchItemRating({ kind: 'cause', entry: pair.cause, rating });
+		if (pair.action && shouldShowAction(pair.action, pair.cause))
+			dispatchItemRating({ kind: 'action', entry: pair.action, rating });
 	}
 </script>
 
@@ -124,12 +152,16 @@
 									}}
 								>
 									<div class="space-y-1">
+										{#if shouldShowCause(pair.cause)}
+											<div class="text-sm text-gray-900 break-words">
+												<span class="font-semibold">原因：</span>{pair.cause?.text}
+											</div>
+										{/if}
+									{#if shouldShowAction(pair.action, pair.cause)}
 										<div class="text-sm text-gray-900 break-words">
-											<span class="font-semibold">原因：</span>{pair.cause?.text ?? '—'}
+											<span class="font-semibold">行动建议：</span>{pair.action?.text}
 										</div>
-										<div class="text-sm text-gray-900 break-words">
-											<span class="font-semibold">行动建议：</span>{pair.action?.text ?? '—'}
-										</div>
+									{/if}
 									</div>
 								</div>
 

@@ -1,4 +1,4 @@
 bot_id: "bkm-bot"
 bot_name: "BKM Bot"
 profile_image_url: ""
-
+action_suggestion_min_score: 0.75

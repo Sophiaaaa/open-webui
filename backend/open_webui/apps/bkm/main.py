@@ -46,6 +46,25 @@ def _get_bot_config() -> Dict[str, Any]:
     cfg = _load_yaml_file(config_path)
     return cfg if isinstance(cfg, dict) else {}
 
+
+def _as_float(v: Any, default: float) -> float:
+    try:
+        if v is None:
+            return default
+        return float(v)
+    except Exception:
+        return default
+
+
+def _get_action_suggestion_min_score() -> float:
+    bot_config = _get_bot_config()
+    min_score = _as_float(bot_config.get("action_suggestion_min_score"), 0.75)
+    if min_score < 0:
+        min_score = 0.0
+    if min_score > 1:
+        min_score = 1.0
+    return float(min_score)
+
 base_dir = os.path.dirname(os.path.abspath(__file__))
 assets_dir = os.path.join(base_dir, "assets")
 if os.path.isdir(assets_dir):
@@ -108,13 +127,15 @@ async def search(request: Request, req: SearchRequest):
     embedding_fn = getattr(request.app.state, "EMBEDDING_FUNCTION", None)
     rerank_fn = getattr(request.app.state, "RERANKING_FUNCTION", None)
     embedding_key = getattr(request.app.state, "EMBEDDING_CACHE_KEY", "")
-    return await data_service.answer_structured(
+    result = await data_service.answer_structured(
         query=req.query,
         top_k=top_k,
         embedding_function=embedding_fn,
         reranking_function=rerank_fn,
         embedding_cache_key=str(embedding_key or ""),
     )
+    result["action_suggestion_min_score"] = _get_action_suggestion_min_score()
+    return result
 
 
 @app.post("/chat/ask")
@@ -132,6 +153,7 @@ async def ask(request: Request, req: AskRequest):
         embedding_cache_key=str(embedding_key or ""),
     )
     result["assets_base_url"] = "/bkm/assets"
+    result["action_suggestion_min_score"] = _get_action_suggestion_min_score()
     return result
 
 
@@ -178,6 +200,7 @@ async def chat_completions(request: OpenAIChatCompletionRequest, raw_request: Re
         "actions": answer.get("actions"),
         "docs_by_item": answer.get("docs_by_item"),
         "assets_base_url": "/bkm/assets",
+        "action_suggestion_min_score": _get_action_suggestion_min_score(),
     }
     content = f"{answer.get('answer_markdown') or ''}\n\n{_bkm_meta_comment(meta)}"
 

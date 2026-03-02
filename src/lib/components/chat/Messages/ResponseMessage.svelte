@@ -116,6 +116,7 @@
 		actions?: BkmRankedText[];
 		docs_by_item?: Record<string, BkmDocHit[]>;
 		assets_base_url?: string;
+		action_suggestion_min_score?: number;
 	};
 
 	type BkmPair = {
@@ -280,8 +281,31 @@
 	let bkmMeta: BkmMeta | null = null;
 	$: bkmMeta = (message?.content ?? '').includes('BKM_META') ? extractBkmMeta(message.content) : null;
 
+	const DEFAULT_BKM_ACTION_SUGGESTION_MIN_SCORE = 0.75;
+	let bkmActionSuggestionMinScore = DEFAULT_BKM_ACTION_SUGGESTION_MIN_SCORE;
+	$: bkmActionSuggestionMinScore =
+		typeof bkmMeta?.action_suggestion_min_score === 'number'
+			? bkmMeta.action_suggestion_min_score
+			: DEFAULT_BKM_ACTION_SUGGESTION_MIN_SCORE;
+
+	function shouldShowBkmAction(action: BkmRankedText | null, cause: BkmRankedText | null): boolean {
+		if (!action) return false;
+		if (!cause) return true;
+		const score = typeof action.score === 'number' ? action.score : 0;
+		return score >= bkmActionSuggestionMinScore;
+	}
+
+	function shouldShowBkmCause(cause: BkmRankedText | null): boolean {
+		if (!cause) return false;
+		const score = typeof cause.score === 'number' ? cause.score : 0;
+		return score >= bkmActionSuggestionMinScore;
+	}
+
+	function shouldShowBkmPair(cause: BkmRankedText | null, action: BkmRankedText | null): boolean {
+		return shouldShowBkmCause(cause) || shouldShowBkmAction(action, cause);
+	}
+
 	let selectedBkmPairIdx: number | null = null;
-	$: if (!bkmMeta || (!bkmMeta?.causes?.length && !bkmMeta?.actions?.length)) selectedBkmPairIdx = null;
 
 	let bkmPairs: BkmPair[] = [];
 	$: bkmPairs = (() => {
@@ -292,7 +316,7 @@
 			idx,
 			cause: causes[idx] ?? null,
 			action: actions[idx] ?? null
-		}));
+		})).filter((pair) => shouldShowBkmPair(pair.cause, pair.action));
 	})();
 
 	function getBkmDocsForEntryIds(entryIds: string[]): BkmDocHit[] {
@@ -321,13 +345,15 @@
 	let selectedBkmDocs: BkmDocHit[] = [];
 	$: selectedBkmDocs = selectedBkmPair
 		? getBkmDocsForEntryIds([
-				selectedBkmPair.cause?.id,
-				selectedBkmPair.action?.id
+				shouldShowBkmCause(selectedBkmPair.cause) ? selectedBkmPair.cause?.id : null,
+				shouldShowBkmAction(selectedBkmPair.action, selectedBkmPair.cause)
+					? selectedBkmPair.action?.id
+					: null
 			].filter(Boolean) as string[])
 		: [];
 
 	$: if (model?.info?.meta?.is_bkm_bot && bkmMeta && bkmPairs && bkmPairs.length > 0) {
-		if (selectedBkmPairIdx === null) {
+		if (selectedBkmPairIdx === null || !selectedBkmPair) {
 			syncBkmDocSidebar([], false);
 		} else {
 			syncBkmDocSidebar(selectedBkmDocs, true);
@@ -436,8 +462,10 @@
 		e.preventDefault();
 		e.stopPropagation();
 		const tasks: Promise<void>[] = [];
-		if (pair.cause) tasks.push(submitBkmItemRating({ kind: 'cause', entry: pair.cause, rating }));
-		if (pair.action) tasks.push(submitBkmItemRating({ kind: 'action', entry: pair.action, rating }));
+		if (pair.cause && shouldShowBkmCause(pair.cause))
+			tasks.push(submitBkmItemRating({ kind: 'cause', entry: pair.cause, rating }));
+		if (pair.action && shouldShowBkmAction(pair.action, pair.cause))
+			tasks.push(submitBkmItemRating({ kind: 'action', entry: pair.action, rating }));
 		await Promise.all(tasks);
 	}
 
@@ -1349,12 +1377,16 @@
 															if (e.key === 'Enter') selectedBkmPairIdx = pair.idx;
 														}}
 													>
-														<div class="text-sm text-gray-900 dark:text-gray-100 break-words">
-															<span class="font-semibold">原因：</span>{pair.cause?.text ?? '—'}
-														</div>
-														<div class="mt-1 text-sm text-gray-900 dark:text-gray-100 break-words">
-															<span class="font-semibold">行动建议：</span>{pair.action?.text ?? '—'}
-														</div>
+												{#if shouldShowBkmCause(pair.cause)}
+													<div class="text-sm text-gray-900 dark:text-gray-100 break-words">
+														<span class="font-semibold">原因：</span>{pair.cause?.text}
+													</div>
+												{/if}
+											{#if shouldShowBkmAction(pair.action, pair.cause)}
+												<div class="mt-1 text-sm text-gray-900 dark:text-gray-100 break-words">
+													<span class="font-semibold">行动建议：</span>{pair.action?.text}
+												</div>
+											{/if}
 													</div>
 
 													{#if !readOnly}
@@ -1515,7 +1547,7 @@
 						class="flex justify-start overflow-x-auto buttons text-gray-600 dark:text-gray-500 mt-0.5"
 					>
 						{#if message.done || siblings.length > 1}
-							{#if siblings.length > 1}
+						{#if siblings.length > 1 && !model?.info?.meta?.is_bkm_bot}
 								<div class="flex self-center min-w-fit" dir="ltr">
 									<button
 										aria-label={$i18n.t('Previous message')}
@@ -1614,7 +1646,7 @@
 
 							{#if message.done}
 								{#if !readOnly}
-									{#if ($user?.role === 'user' ? ($user?.permissions?.chat?.edit ?? true) : true) && !model?.info?.meta?.is_bottun_rule_bot}
+									{#if ($user?.role === 'user' ? ($user?.permissions?.chat?.edit ?? true) : true) && !model?.info?.meta?.is_bottun_rule_bot && !model?.info?.meta?.is_bkm_bot}
 										<Tooltip content={$i18n.t('Edit')} placement="bottom">
 											<button
 												aria-label={$i18n.t('Edit')}
@@ -1703,7 +1735,7 @@
 									</Tooltip>
 								{/if}
 
-								{#if ($user?.role === 'admin' || ($user?.permissions?.chat?.tts ?? true)) && !model?.info?.meta?.is_bottun_rule_bot}
+							{#if ($user?.role === 'admin' || ($user?.permissions?.chat?.tts ?? true)) && !model?.info?.meta?.is_bottun_rule_bot && !model?.info?.meta?.is_bkm_bot}
 									<Tooltip content={$i18n.t('Read Aloud')} placement="bottom">
 										<button
 											aria-label={$i18n.t('Read Aloud')}
@@ -1791,7 +1823,7 @@
 									</Tooltip>
 								{/if}
 
-								{#if message.usage && !model?.info?.meta?.is_bottun_rule_bot}
+							{#if message.usage && !model?.info?.meta?.is_bottun_rule_bot && !model?.info?.meta?.is_bkm_bot}
 									<Tooltip
 										content={message.usage
 											? `<pre>${sanitizeResponseContent(
@@ -1941,7 +1973,7 @@
 										</Tooltip>
 									{/if}
 
-									{#if isLastMessage && ($user?.role === 'admin' || ($user?.permissions?.chat?.continue_response ?? true)) && !model?.info?.meta?.is_bottun_rule_bot}
+									{#if isLastMessage && ($user?.role === 'admin' || ($user?.permissions?.chat?.continue_response ?? true)) && !model?.info?.meta?.is_bottun_rule_bot && !model?.info?.meta?.is_bkm_bot}
 										<Tooltip content={$i18n.t('Continue Response')} placement="bottom">
 											<button
 												aria-label={$i18n.t('Continue Response')}
@@ -2090,7 +2122,7 @@
 										{/if}
 									{/if}
 
-									{#if ($user?.role === 'admin' || ($user?.permissions?.chat?.delete_message ?? true)) && !model?.info?.meta?.is_bottun_rule_bot}
+									{#if ($user?.role === 'admin' || ($user?.permissions?.chat?.delete_message ?? true)) && !model?.info?.meta?.is_bottun_rule_bot && !model?.info?.meta?.is_bkm_bot}
 										{#if siblings.length > 1}
 											<Tooltip content={$i18n.t('Delete')} placement="bottom">
 												<button
@@ -2124,7 +2156,7 @@
 										{/if}
 									{/if}
 
-									{#each (model?.info?.meta?.is_bottun_rule_bot ? [] : (model?.actions ?? [])) as action}
+									{#each (model?.info?.meta?.is_bottun_rule_bot || model?.info?.meta?.is_bkm_bot ? [] : (model?.actions ?? [])) as action}
 										<Tooltip content={action.name} placement="bottom">
 											<button
 												type="button"
@@ -2170,7 +2202,7 @@
 						/>
 					{/if}
 
-					{#if (isLastMessage || ($settings?.keepFollowUpPrompts ?? false)) && message.done && !readOnly && (message?.followUps ?? []).length > 0 && !model?.info?.meta?.is_bottun_rule_bot}
+					{#if (isLastMessage || ($settings?.keepFollowUpPrompts ?? false)) && message.done && !readOnly && (message?.followUps ?? []).length > 0 && !model?.info?.meta?.is_bottun_rule_bot && !model?.info?.meta?.is_bkm_bot}
 						<div class="mt-2.5" in:fade={{ duration: 100 }}>
 							<FollowUps
 								followUps={message?.followUps}

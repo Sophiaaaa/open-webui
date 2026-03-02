@@ -19,6 +19,7 @@ export type BkmAskResponse = {
 	actions: BkmRankedText[];
 	docs_by_item: Record<string, BkmDocHit[]>;
 	assets_base_url?: string;
+	action_suggestion_min_score?: number;
 };
 
 export const getBkmStatus = async () => {
